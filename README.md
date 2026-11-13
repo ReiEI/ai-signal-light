@@ -74,21 +74,49 @@ Windows 桌面常驻小挂件。无边框、始终置顶、可拖拽，用一盏
 | `waiting` 待处理 | 琥珀 | 快速闪烁 | 在等你确认/输入 |
 | `failed` 失败 | 红 | 常亮 + 强发光 | 出错，停留 60 秒 |
 
-## 快速开始
+## 两种用法，自己挑
 
-**方式一：直接跑 exe（不需要 Python）**
+| | **A · 下载即用** | **B · 自己构建** |
+|---|---|---|
+| 适合 | 不想碰 Python，挂个灯就走 | 要改代码 / 不想跑未签名 exe / 想自己出包 |
+| 需要 | Windows 10/11 x64 | 再加 Python 3.13 x64 |
+| 操作 | 下载 → 双击 | `安装.cmd` → `启动.cmd` |
+| 首次耗时 | 约 1 分钟 | 3~5 分钟（装依赖 + 自检） |
+| 可控性 | 二进制黑盒 | 全是源码，行行能改 |
 
-到 [Releases](../../releases) 下载 `SignalLight.exe` 与 `fan_agent.exe`，放在同一目录，双击前者。单文件已内嵌运行时。
+两条路产出的界面、功能完全一样，区别只在"谁来编译"。
 
-> 仓库不存 exe（单个 46MB，会把 clone 拖慢）。要自己出包：`打包.cmd`，产物在 `dist\`。
+### A · 下载即用（不需要 Python）
 
-**方式二：从源码跑**
+到 [Releases](../../releases/latest) 下载，**放在同一个文件夹**：
+
+| 文件 | 作用 | 必需 |
+|---|---|---|
+| `SignalLight.exe` | 挂件本体 | ✅ |
+| `fan_agent.exe` | 散热执行体，点「散热」时才被拉起 | 可选 |
+| `signal.exe` | 命令行写状态，给自定义脚本 / 流水线用 | 可选 |
+
+双击 `SignalLight.exe` 就能用。单文件已内嵌 Python 运行时和 Qt，不装任何东西，也不写注册表（只在 `%LOCALAPPDATA%\AIStatusLight` 存状态与设置）。
+
+**首次运行可能弹「Windows 已保护你的电脑」**：exe 没有代码签名证书（个人项目，证书一年几百到几千元），Windows SmartScreen 对无签名的陌生程序一律拦一下。点「更多信息 → 仍要运行」。不放心就走 B 方案自己编译——源码全在这里，你能亲眼看完再打包。
+
+**为什么 exe 不进仓库**：`SignalLight.exe` 单个 46MB，进 git 会让每次 clone 都拖 60MB，且二进制无法 review、每次改动都在历史里多一份。放 Release 是 GitHub 对二进制的标准做法。
+
+### B · 自己构建
 
 ```bat
-安装.cmd      :: 首次执行，建虚拟环境 + 装依赖 + 自检
-启动.cmd      :: 启动挂件（有 exe 优先用 exe，否则用源码）
+安装.cmd      :: 建虚拟环境 + 按 requirements.txt 装依赖 + 跑一遍自检
+启动.cmd      :: 启动挂件（有 dist\SignalLight.exe 就优先用它，否则用源码）
 演示.cmd      :: 循环演示五种状态
 ```
+
+只改代码、想立刻看效果，到这一步就够了。要出独立 exe（产物在 `dist\`，和 Release 里那份同源）：
+
+```bat
+打包.cmd      :: 依次打 SignalLight.exe / signal.exe / fan_agent.exe
+```
+
+依赖已固定版本（`PySide6==6.12.0`、`psutil==7.2.2`），`安装.cmd` 读 `requirements.txt`，不会因为上游发新版而行为漂移。打包另需 `pyinstaller`，`打包.cmd` 会自己装。
 
 启动后出现在屏幕右下角。**拖拽**移动，**双击**在标准卡/横条之间切换，**右键**出菜单（置顶 / 样式 / 尺寸 / 温度 / **散热** / 开机自启 / 演示 / 退出）。托盘图标双击可隐藏/显示。
 
@@ -344,6 +372,7 @@ AI工作信号灯/
 ├─ signal.py            状态写入端（源码）
 ├─ install_hooks.py     WorkBuddy 接入安装器（幂等 / 可卸载）
 ├─ selftest.py          自检（21 项）
+├─ requirements.txt     依赖固定版本（PySide6 / psutil）
 ├─ 安装.cmd / 启动.cmd / 演示.cmd / 打包.cmd / signal.cmd
 ├─ 接入WorkBuddy.cmd / 断开WorkBuddy.cmd
 └─ _dev/                开发期工具（离屏渲染、抓屏、测试），不参与运行
