@@ -66,7 +66,7 @@ STYLE_STACK = "stack"
 
 STYLE_ORDER = (STYLE_STANDARD, STYLE_BAR, STYLE_STACK)
 STYLE_NAMES = {STYLE_STANDARD: "标准卡", STYLE_BAR: "横条", STYLE_STACK: "竖版"}
-STYLE_HINTS = {STYLE_STANDARD: "灯 + 四列指标", STYLE_BAR: "两行贴边", STYLE_STACK: "窄竖排"}
+STYLE_HINTS = {STYLE_STANDARD: "灯 + 指标列", STYLE_BAR: "两行贴边", STYLE_STACK: "窄竖排"}
 
 # 基准尺寸（不含缩放）。实际窗口 = 基准 × scale。
 BASE_SIZE = {
@@ -82,6 +82,16 @@ SCALE_STEPS = ((0.85, "小"), (1.0, "标准"), (1.15, "大"), (1.35, "超大"))
 # 避免"有没有在散热"影响版式比例 —— 那会让每次开关风扇卡片都轻微变形。
 STRIP_STANDARD = 30.0
 STRIP_STACK = 34.0
+
+# 指标区的高度常量集中在这里：_base_size 和 paint 必须用同一套数字，
+# 各写各的迟早出现"高度算出来 118，实际内容画到 122"这种裁切。
+STD_METRICS_H = 62.0     # 标准卡：分隔线 + 8px 间隙 + 54px 内容
+STACK_GAP_TASK = 11.0    # 竖版：任务区下沿到第一条指标（分隔线到内容）
+STACK_GAP_HEAD = 8.0     # 竖版：没有任务区时，卡片顶部到第一条指标
+STACK_ROW_H = 36.0
+BAR_ONLY_METRICS_H = 40.0  # 横条只剩指标串时的总高
+
+METRIC_NAMES = {"cpu": "CPU", "mem": "内存", "temp": "温度", "net": "网络"}
 
 # 多任务并行：每个任务占一行（横条）或两行（标准卡/竖版：名称 + 指令）。
 # 上限 3 个 —— 常驻挂件不是任务管理器，再多就该去做窗口而不是贴屏幕。
@@ -245,18 +255,46 @@ class SignalLight(QWidget):
     # ---------------- 生命周期 ----------------
 
     def _base_size(self) -> tuple[float, float]:
-        """基准尺寸（不含缩放）。散热条与多任务行各自加高，不改变宽高比。"""
-        w, h = BASE_SIZE[self.style]
-        h += self._extra_h()
-        if self.cool is not None:
-            if self.style == STYLE_STANDARD:
-                h += STRIP_STANDARD
-            elif self.style == STYLE_STACK:
+        """基准尺寸（不含缩放）。
+
+        高度不是常量，而是按"当前显示了哪些区块"推出来的：
+        关掉任务区，卡片自然缩到只剩指标；关掉指标区，只剩任务。
+        两个区块都关不合法，set_show 会拦住，load_settings 也会兜底。
+        """
+        w = BASE_SIZE[self.style][0]
+        task_on = self._task_on()
+        n = len(self._metric_keys())
+        strip = self.cool is not None
+
+        if self.style == STYLE_BAR:
+            # 横条没有单独的散热行，散热只占一个 × 热区，不影响高度
+            if not task_on:
+                return w, BAR_ONLY_METRICS_H
+            return w, 64.0 + self._bar_extra_h()
+
+        if self.style == STYLE_STACK:
+            h = 16.0 + (self._stack_task_h() if task_on else 0.0)
+            if n:
+                h += (STACK_GAP_TASK if task_on else STACK_GAP_HEAD) + STACK_ROW_H * n
+            h += 4.0
+            if strip:
                 h += STRIP_STACK
+            return w, h
+
+        h = 16.0 + (self._std_task_h() if task_on else 0.0)
+        if n:
+            h += STD_METRICS_H
+        h += 4.0
+        if strip:
+            h += STRIP_STANDARD
         return w, h
 
     def _fit_rows(self) -> None:
         """可见任务行数变了才动窗口大小，否则每次心跳都会重设尺寸。"""
+        if not self._task_on():
+            # 任务区关着，行数不影响尺寸 —— 别让新任务把窗口"重新摆"一次
+            self.update()
+            return
         n = min(len(self.rows), MAX_ROWS)
         if n != self._rows_shown:
             self._rows_shown = n
@@ -334,9 +372,9 @@ class SignalLight(QWidget):
                 s, title, detail, time.time(), 999, False, 0.0, workspace=work,
             )
             self.status = self.reader._last
-            self.status = self.reader._last
-        self._on_state_change()  # 阻断真实文件覆盖
-        self.status = self.reader._last
+        # 两个分支各自决定了 status，这里只做一次收尾。
+        # 早先这里多了一行无条件 self.status = reader._last，
+        # 把多任务那步 compose 出来的状态覆盖回上一条单任务状态。
         self._on_state_change()
 
     def _poll_state(self) -> None:
@@ -388,9 +426,9 @@ class SignalLight(QWidget):
         elif prev is not None and self.cool is not None and (prev.mode != self.cool.mode):
             self._update_tray()
 
-    def _notify(self, text: str) -> None:
+    def _notify(self, text: str, title: str = "AI 工作信号灯 · 散热") -> None:
         try:
-            self.tray.showMessage("AI 工作信号灯 · 散热", text, QSystemTrayIcon.Information, 4000)
+            self.tray.showMessage(title, text, QSystemTrayIcon.Information, 4000)
         except Exception:  # noqa: BLE001
             pass
 
@@ -469,19 +507,33 @@ class SignalLight(QWidget):
     def _status_label(self) -> str:
         return "信号中断" if self.status.stale else self.status.label
 
+    # ---- 显示元素 ----
+    def _task_on(self) -> bool:
+        return bool(self.settings.get("show_task", True))
+
+    def _metric_keys(self) -> tuple[str, ...]:
+        """生效的指标列，顺序即绘制顺序。总开关关掉就返回空。"""
+        return st.metric_keys_of(self.settings)
+
     # ---- 多任务：行数与高度 ----
-    def _extra_h(self) -> float:
-        """多任务带来的额外高度（基准坐标）。n=1 必须为 0，
-        否则单任务场景的窗口尺寸会跟着一起漂。"""
+    def _std_task_h(self) -> float:
+        """标准卡任务区高度：单任务 56（到分隔线），多任务 16+30n。"""
+        rows, more = self._visible_rows()
+        if len(rows) <= 1 and not more:
+            return 56.0
+        return 16.0 + 30.0 * (len(rows) + (1 if more else 0))
+
+    def _stack_task_h(self) -> float:
+        """竖版任务区高度：单任务 73（到分隔线），每多一行 +30。"""
+        rows, more = self._visible_rows()
+        if len(rows) <= 1 and not more:
+            return 73.0
+        return 73.0 + 30.0 * (len(rows) + (1 if more else 0) - 1)
+
+    def _bar_extra_h(self) -> float:
+        """横条多任务带来的额外高度。n=1 必须为 0，否则单任务尺寸会跟着漂。"""
         n = min(len(self.rows), MAX_ROWS)
-        if n <= 1:
-            return 0.0
-        if self.style == STYLE_STANDARD:
-            # 分隔线落在 16+30n（单任务是 56），差值即增量
-            return 30.0 * n - 40.0
-        if self.style == STYLE_BAR:
-            return 22.0 * (n - 1)
-        return 30.0 * (n - 1)
+        return 22.0 * (n - 1) if n > 1 else 0.0
 
     def _visible_rows(self) -> tuple[list, int]:
         """返回 (要画的任务, 未画出的数量)。
@@ -545,11 +597,17 @@ class SignalLight(QWidget):
             return
         self._draw_elided(p, detail, _f(size), TXT_DIM, QRectF(x, y, w, 14))
 
-    # ---- 标准卡：400×138 ----
+    # ---- 标准卡：400×138（开满时的尺寸，关区块会缩）----
     def _paint_standard(self, p: QPainter, card: QRectF) -> None:
+        keys = self._metric_keys()
+        if not self._task_on():
+            # 只剩指标区：不画分隔线，也不留状态灯的位置
+            y = self._paint_metrics_std(p, card, card.top(), keys, divider=False)
+            self._paint_strip(p, card, y)
+            return
         rows, more = self._visible_rows()
         if len(rows) > 1 or more:
-            self._paint_standard_multi(p, card, rows, more)
+            self._paint_standard_multi(p, card, rows, more, keys)
             return
         stt = self.status
         color = self._status_color()
@@ -597,38 +655,51 @@ class SignalLight(QWidget):
                     Qt.AlignRight | Qt.AlignVCenter, el,
                 )
 
-        # 分隔线
-        p.setPen(QPen(DIVIDER, 1))
-        dy = card.top() + 56
-        p.drawLine(
-            QPoint(int(card.left() + pad), int(dy)),
-            QPoint(int(card.right() - pad), int(dy)),
-        )
+        y = self._paint_metrics_std(p, card, card.top() + 56.0, keys)
+        self._paint_strip(p, card, y)
 
-        self._paint_metrics_std(p, card, card.top() + 64)
+    def _paint_metrics_std(self, p: QPainter, card: QRectF, y: float,
+                           keys: tuple[str, ...], divider: bool = True) -> float:
+        """画指标列，返回指标区下沿的 y。
 
-        self._paint_strip(p, card, card.top() + 118.0)
-
-    def _paint_metrics_std(self, p: QPainter, card: QRectF, y: float) -> None:
+        divider=True 在 y 处画分隔线；没有任务区时不画线，但内容同样从 y+8 起，
+        否则文字会贴着卡片圆角。
+        """
+        if not keys:
+            return y
         pad = 14.0
+        if divider:
+            p.setPen(QPen(DIVIDER, 1))
+            p.drawLine(
+                QPoint(int(card.left() + pad), int(y)),
+                QPoint(int(card.right() - pad), int(y)),
+            )
+        y += 8.0
         m = self.metrics
-        col_w = (card.width() - pad * 2) / 4.0
-        self._metric_col(
-            p, card.left() + pad, y, col_w, "CPU", f"{m.cpu:.0f}%",
-            f"{m.cores} 核" if m.cores else "", m.cpu,
-        )
-        self._metric_col(
-            p, card.left() + pad + col_w, y, col_w, "内存", f"{m.mem:.0f}%",
-            m.mem_gb, m.mem,
-        )
-        self._metric_col(
-            p, card.left() + pad + col_w * 2, y, col_w, "温度", self._temp_text(),
-            self._temp_note(), self.thermal.temp, TEMP_WARN, TEMP_HOT,
-        )
-        self._net_col(p, card.left() + pad + col_w * 3, y, col_w)
+        col_w = (card.width() - pad * 2) / len(keys)
+        for i, k in enumerate(keys):
+            x = card.left() + pad + col_w * i
+            if k == "cpu":
+                self._metric_col(
+                    p, x, y, col_w, "CPU", f"{m.cpu:.0f}%",
+                    f"{m.cores} 核" if m.cores else "", m.cpu,
+                )
+            elif k == "mem":
+                self._metric_col(
+                    p, x, y, col_w, "内存", f"{m.mem:.0f}%", m.mem_gb, m.mem,
+                )
+            elif k == "temp":
+                self._metric_col(
+                    p, x, y, col_w, "温度", self._temp_text(),
+                    self._temp_note(), self.thermal.temp, TEMP_WARN, TEMP_HOT,
+                )
+            else:
+                self._net_col(p, x, y, col_w)
+        return y + (STD_METRICS_H - 8.0)
 
     def _paint_standard_multi(self, p: QPainter, card: QRectF,
-                              rows: list, more: int) -> None:
+                              rows: list, more: int,
+                              keys: tuple[str, ...]) -> None:
         """多任务：每个任务两行（标识行 + 指令行），不再画大灯。
 
         大灯表达的是"唯一状态"，多任务同时存在 running / waiting 时它没有意义，
@@ -647,13 +718,8 @@ class SignalLight(QWidget):
         if more:
             self._more_line(p, x, y, inner, more, 8.5)
 
-        lines = len(rows) + (1 if more else 0)
-        dy = card.top() + 16.0 + 30.0 * lines
-        p.setPen(QPen(DIVIDER, 1))
-        p.drawLine(QPoint(int(x), int(dy)), QPoint(int(card.right() - pad), int(dy)))
-
-        self._paint_metrics_std(p, card, dy + 8.0)
-        self._paint_strip(p, card, dy + 62.0)
+        y = self._paint_metrics_std(p, card, card.top() + self._std_task_h(), keys)
+        self._paint_strip(p, card, y)
 
     # ---- 散热条（标准卡底部，仅在有会话时出现）----
     def _paint_strip(self, p: QPainter, card: QRectF, y: float) -> None:
@@ -713,6 +779,9 @@ class SignalLight(QWidget):
 
     # ---- 横条：320×64 ----
     def _paint_bar(self, p: QPainter, card: QRectF) -> None:
+        if not self._task_on():
+            self._paint_bar_metrics_only(p, card)
+            return
         rows, more = self._visible_rows()
         if len(rows) > 1 or more:
             self._paint_bar_multi(p, card, rows, more)
@@ -740,7 +809,8 @@ class SignalLight(QWidget):
 
         # 第二行：左详情 + 右指标串 +（散热中时）一个停止按钮
         micro = self._micro_metrics()
-        mw = QFontMetrics(_f(7, QFont.Normal, FONT_MONO)).horizontalAdvance(micro)
+        mw = (QFontMetrics(_f(7, QFont.Normal, FONT_MONO)).horizontalAdvance(micro)
+              if micro else 0.0)
         # 横条只有 64px 高，塞不下散热条，但不能因此没有停止入口 ——
         # 用户的主力版式可能就是横条，只能右键停等于把"停止"藏起来了。
         stop_w = 20.0 if self.cool is not None else 0.0
@@ -752,14 +822,42 @@ class SignalLight(QWidget):
             QRectF(text_x, card.top() + 26,
                    card.right() - pad - text_x - mw - stop_w - 10, 16),
         )
-        p.setFont(_f(7, QFont.Normal, FONT_MONO))
-        p.setPen(TXT_FAINT)
-        p.drawText(
-            QRectF(card.right() - pad - stop_w - mw - 2, card.top() + 26, mw + 2, 16),
-            Qt.AlignRight | Qt.AlignVCenter, micro,
-        )
+        if micro:
+            p.setFont(_f(7, QFont.Normal, FONT_MONO))
+            p.setPen(TXT_FAINT)
+            p.drawText(
+                QRectF(card.right() - pad - stop_w - mw - 2, card.top() + 26, mw + 2, 16),
+                Qt.AlignRight | Qt.AlignVCenter, micro,
+            )
         if stop_w:
             r = QRectF(card.right() - pad - 13, card.top() + 27, 13, 13)
+            self._stop_rect = r
+            border = QColor(AMBER)
+            border.setAlpha(130)
+            p.setBrush(QColor(245, 158, 11, 30))
+            p.setPen(QPen(border, 1))
+            p.drawRoundedRect(r, 3.5, 3.5)
+            p.setPen(AMBER)
+            p.setFont(_f(8.5, QFont.DemiBold))
+            p.drawText(r, Qt.AlignCenter, "×")
+
+    def _paint_bar_metrics_only(self, p: QPainter, card: QRectF) -> None:
+        """任务区关掉后的横条：一条只有硬件的细条。
+
+        高度只剩 24px，没地方放状态词，也不该放 —— 这时候它不再是"信号灯"，
+        就是一块贴边的系统监视条。
+        """
+        pad = 12.0
+        micro = self._micro_metrics()
+        stop_w = 20.0 if self.cool is not None else 0.0
+        self._draw_elided(
+            p, micro, _f(8, QFont.Normal, FONT_MONO), TXT_DIM,
+            QRectF(card.left() + pad, card.top(),
+                   card.width() - pad * 2 - stop_w, card.height()),
+        )
+        if stop_w:
+            r = QRectF(card.right() - pad - 13,
+                       card.top() + (card.height() - 13) / 2.0, 13, 13)
             self._stop_rect = r
             border = QColor(AMBER)
             border.setAlpha(130)
@@ -789,12 +887,14 @@ class SignalLight(QWidget):
             y += 22.0
 
         micro = self._micro_metrics()
-        mw = QFontMetrics(_f(7, QFont.Normal, FONT_MONO)).horizontalAdvance(micro)
+        mw = (QFontMetrics(_f(7, QFont.Normal, FONT_MONO)).horizontalAdvance(micro)
+              if micro else 0.0)
         stop_w = 20.0 if self.cool is not None else 0.0
-        p.setFont(_f(7, QFont.Normal, FONT_MONO))
-        p.setPen(TXT_FAINT)
-        p.drawText(QRectF(card.right() - pad - stop_w - mw - 2, y, mw + 2, 16),
-                   Qt.AlignRight | Qt.AlignVCenter, micro)
+        if micro:
+            p.setFont(_f(7, QFont.Normal, FONT_MONO))
+            p.setPen(TXT_FAINT)
+            p.drawText(QRectF(card.right() - pad - stop_w - mw - 2, y, mw + 2, 16),
+                       Qt.AlignRight | Qt.AlignVCenter, micro)
         if stop_w:
             r = QRectF(card.right() - pad - 13, y + 1, 13, 13)
             self._stop_rect = r
@@ -808,94 +908,117 @@ class SignalLight(QWidget):
             p.drawText(r, Qt.AlignCenter, "×")
 
     def _micro_metrics(self) -> str:
-        """横条上的指标串：CPU · 内存 · 温度 · 下行。标签省到最短，靠符号自解释。
+        """横条上的指标串，按当前开启的指标列拼。列全关时返回空串。
 
-        散热进行中时换成「散热剩余 + CPU + 温度」：横条只有 274px 可用，
-        硬塞五项会把左侧任务详情挤没。而在机器正被加热的时候，
-        内存和上行恰好是最不重要的两个数。
+        标签省到最短，靠符号自解释：CPU 有名字（不然 33% 不知道是什么），
+        内存跟在后面省略、温度只给度数、网络用箭头。
+        散热进行中时额外前置剩余时间 —— 横条只有 274px，
+        硬塞会和左侧任务详情打架，所以散热态下不再显示内存和上行。
         """
-        t = self.thermal.temp
-        temp = f"{t:.0f}°" if t is not None else "—"
+        keys = self._metric_keys()
+        if not keys:
+            return ""
+        m = self.metrics
+        parts = []
         if self.cool is not None:
-            head = f"散热{fmt_short(self.cool.remaining())}" if self.cool.has_deadline() else "散热中"
-            return f"{head} · CPU {self.metrics.cpu:.0f}% · {temp} · ↓{metrics_mod.fmt_rate(self.metrics.down)}"
-        return f"CPU {self.metrics.cpu:.0f}% · {self.metrics.mem:.0f}% · {temp} · ↓{metrics_mod.fmt_rate(self.metrics.down)}"
+            parts.append(
+                f"散热{fmt_short(self.cool.remaining())}"
+                if self.cool.has_deadline() else "散热中"
+            )
+        if "cpu" in keys:
+            parts.append(f"CPU {m.cpu:.0f}%")
+        if "mem" in keys:
+            parts.append(f"{m.mem:.0f}%")
+        if "temp" in keys:
+            t = self.thermal.temp
+            parts.append(f"{t:.0f}°" if t is not None else "—")
+        if "net" in keys:
+            parts.append("↓" + metrics_mod.fmt_rate(m.down))
+        return " · ".join(parts)
 
-    # ---- 竖版：200×248 ----
+    # ---- 竖版：200×248（开满时）----
     def _paint_stack(self, p: QPainter, card: QRectF) -> None:
+        keys = self._metric_keys()
+        task_on = self._task_on()
         rows, more = self._visible_rows()
-        multi = len(rows) > 1 or more
-        lines = len(rows) + (1 if more else 0) if multi else 1
-        shift = 30.0 * (lines - 1)
+        multi = task_on and (len(rows) > 1 or more)
         stt = self.status
         color = self._status_color()
         pad = 14.0
-
-        # 多任务时每行自带色点，大灯再占一块就纯属浪费 —— 而且会和
-        # 第一行的圆点挤在一起，看起来像两个灯叠着。
-        if not multi:
-            self._draw_lamp(p, card.left() + pad + 7, card.top() + 22, stt.state, color)
-
-        text_x = card.left() + pad + (0.0 if multi else 20.0)
-        p.setFont(_f(10, QFont.DemiBold))
-        p.setPen(color if stt.state != st.IDLE else TXT_DIM)
-        p.drawText(
-            QRectF(text_x, card.top() + 12, card.right() - pad - text_x, 19),
-            Qt.AlignLeft | Qt.AlignVCenter, self._status_label(),
-        )
-
         inner_w = card.width() - pad * 2
-        if multi:
-            y = card.top() + 35.0
-            for it in rows:
-                self._task_line(p, card.left() + pad, y, inner_w, it, 8.5, 12.0, dot=True)
-                self._task_detail(p, card.left() + pad + 15.0, y + 15, inner_w - 15.0, it, 7.5)
-                y += 30.0
-            if more:
-                self._more_line(p, card.left() + pad, y, inner_w, more, 7.5)
-        else:
-            if stt.workspace or stt.title:
-                self._draw_task_name(
-                    p, QRectF(card.left() + pad, card.top() + 35, inner_w, 15), 8.5,
-                )
-            detail = stt.detail or ("等待任务信号" if stt.state == st.IDLE else "")
-            if stt.peers > 0:
-                detail = f"{detail} · 另有 {stt.peers} 个" if detail else f"另有 {stt.peers} 个任务"
-            if stt.state in (st.RUNNING, st.WAITING, st.FAILED) and stt.ts:
-                el = fmt_elapsed(time.time() - stt.ts)
-                if el:
-                    detail = f"{detail} · {el}" if detail else el
-            self._draw_elided(
-                p, detail, _f(7.5), TXT_FAINT,
-                QRectF(card.left() + pad, card.top() + 51, inner_w, 14),
+        m = self.metrics
+
+        if task_on:
+            # 多任务时每行自带色点，大灯再占一块纯属浪费 —— 而且会和
+            # 第一行的圆点挤在一起，看起来像两个灯叠着。
+            if not multi:
+                self._draw_lamp(p, card.left() + pad + 7, card.top() + 22, stt.state, color)
+
+            text_x = card.left() + pad + (0.0 if multi else 20.0)
+            p.setFont(_f(10, QFont.DemiBold))
+            p.setPen(color if stt.state != st.IDLE else TXT_DIM)
+            p.drawText(
+                QRectF(text_x, card.top() + 12, card.right() - pad - text_x, 19),
+                Qt.AlignLeft | Qt.AlignVCenter, self._status_label(),
             )
 
-        p.setPen(QPen(DIVIDER, 1))
-        dy = card.top() + 73 + shift
-        p.drawLine(
-            QPoint(int(card.left() + pad), int(dy)),
-            QPoint(int(card.right() - pad), int(dy)),
-        )
+            if multi:
+                y = card.top() + 35.0
+                for it in rows:
+                    self._task_line(p, card.left() + pad, y, inner_w, it, 8.5, 12.0, dot=True)
+                    self._task_detail(p, card.left() + pad + 15.0, y + 15, inner_w - 15.0, it, 7.5)
+                    y += 30.0
+                if more:
+                    self._more_line(p, card.left() + pad, y, inner_w, more, 7.5)
+            else:
+                if stt.workspace or stt.title:
+                    self._draw_task_name(
+                        p, QRectF(card.left() + pad, card.top() + 35, inner_w, 15), 8.5,
+                    )
+                detail = stt.detail or ("等待任务信号" if stt.state == st.IDLE else "")
+                if stt.peers > 0:
+                    detail = f"{detail} · 另有 {stt.peers} 个" if detail else f"另有 {stt.peers} 个任务"
+                if stt.state in (st.RUNNING, st.WAITING, st.FAILED) and stt.ts:
+                    el = fmt_elapsed(time.time() - stt.ts)
+                    if el:
+                        detail = f"{detail} · {el}" if detail else el
+                self._draw_elided(
+                    p, detail, _f(7.5), TXT_FAINT,
+                    QRectF(card.left() + pad, card.top() + 51, inner_w, 14),
+                )
 
-        m = self.metrics
-        y = card.top() + 84 + shift
-        row_h = 36.0
-        x = card.left() + pad
-        self._stack_row(p, x, y, inner_w, "CPU", f"{m.cpu:.0f}%",
-                        pct=m.cpu, sub=f"{m.cores} 核" if m.cores else "")
-        y += row_h
-        self._stack_row(p, x, y, inner_w, "内存", f"{m.mem:.0f}%", pct=m.mem, sub=m.mem_gb)
-        y += row_h
-        self._stack_row(p, x, y, inner_w, "温度", self._temp_text(),
-                        pct=self.thermal.temp, sub=self._temp_note(),
-                        warn=TEMP_WARN, hot=TEMP_HOT)
-        y += row_h
-        self._stack_row(p, x, y, inner_w, "网络",
-                        "↓" + metrics_mod.fmt_rate(m.down),
-                        sub="↑" + metrics_mod.fmt_rate(m.up))
+            p.setPen(QPen(DIVIDER, 1))
+            dy = card.top() + self._stack_task_h()
+            p.drawLine(
+                QPoint(int(card.left() + pad), int(dy)),
+                QPoint(int(card.right() - pad), int(dy)),
+            )
+
+        base = card.top() + (self._stack_task_h() if task_on else 0.0)
+        my = base + (STACK_GAP_TASK if task_on else STACK_GAP_HEAD)
+        for i, k in enumerate(keys):
+            y = my + STACK_ROW_H * i
+            if k == "cpu":
+                self._stack_row(p, card.left() + pad, y, inner_w, "CPU",
+                                f"{m.cpu:.0f}%", pct=m.cpu,
+                                sub=f"{m.cores} 核" if m.cores else "")
+            elif k == "mem":
+                self._stack_row(p, card.left() + pad, y, inner_w, "内存",
+                                f"{m.mem:.0f}%", pct=m.mem, sub=m.mem_gb)
+            elif k == "temp":
+                self._stack_row(p, card.left() + pad, y, inner_w, "温度",
+                                self._temp_text(), pct=self.thermal.temp,
+                                sub=self._temp_note(), warn=TEMP_WARN, hot=TEMP_HOT)
+            else:
+                self._stack_row(p, card.left() + pad, y, inner_w, "网络",
+                                "↓" + metrics_mod.fmt_rate(m.down),
+                                sub="↑" + metrics_mod.fmt_rate(m.up))
 
         if self.cool is not None:
-            self._paint_stack_strip(p, card, card.top() + 226.0 + shift)
+            end = my + STACK_ROW_H * len(keys)
+            # 有指标行时上提 2px：最后一行的小字会越出 36px 名义行高一丁点，
+            # 不让开就会和分隔线叠在一起。
+            self._paint_stack_strip(p, card, end - (2.0 if keys else 0.0))
 
     def _paint_stack_strip(self, p: QPainter, card: QRectF, y: float) -> None:
         s = self.cool
@@ -1220,6 +1343,25 @@ class SignalLight(QWidget):
         self.setWindowFlag(Qt.WindowStaysOnTopHint, on)
         self.show()
 
+    def set_show(self, key: str, value: bool) -> None:
+        """切换某个显示元素。
+
+        唯一需要拦的情况是"两个区块都关"——那会剩一张空卡片，
+        既没有状态也没有数据，纯属占屏幕。拦下来并提示，比让它变成
+        一个不知道是什么的矩形要好。
+        """
+        if key not in st.SHOW_KEYS:
+            return
+        old = self.settings.get(key)
+        self.settings[key] = bool(value)
+        if not (self._task_on() or self._metric_keys()):
+            self.settings[key] = old
+            self._notify("两个区块不能都关掉\n至少保留一个显示元素", "AI 工作信号灯")
+            return
+        st.save_settings(self.settings)
+        self._apply_size(keep_center=True)
+        self.update()
+
     def _menu(self) -> QMenu:
         m = QMenu(self)
         m.setStyleSheet(
@@ -1263,6 +1405,30 @@ class SignalLight(QWidget):
             a.triggered.connect(lambda _c=False, v=val: self.set_scale(v))
             g2.addAction(a)
             zm.addAction(a)
+
+        # 显示元素：两个区块 + 四个指标列。关到空壳会被 set_show 挡住。
+        vm = m.addMenu("显示元素")
+        a_task = QAction("AI 任务（状态与明细）", vm)
+        a_task.setCheckable(True)
+        a_task.setChecked(self._task_on())
+        a_task.triggered.connect(lambda v: self.set_show("show_task", v))
+        vm.addAction(a_task)
+
+        vm.addSeparator()
+        mm = vm.addMenu("硬件指标")
+        n_on = len(self._metric_keys())
+        a_blk = QAction("整个区块" + (f"（{n_on} 项）" if n_on else "（已关）"), mm)
+        a_blk.setCheckable(True)
+        a_blk.setChecked(bool(self.settings.get("show_metrics", True)))
+        a_blk.triggered.connect(lambda v: self.set_show("show_metrics", v))
+        mm.addAction(a_blk)
+        mm.addSeparator()
+        for k in st.METRIC_KEYS:
+            a = QAction(METRIC_NAMES[k], mm)
+            a.setCheckable(True)
+            a.setChecked(bool(self.settings.get("show_" + k, True)))
+            a.triggered.connect(lambda v, key=k: self.set_show("show_" + key, v))
+            mm.addAction(a)
 
         # 温度来源
         tm = m.addMenu("温度")
