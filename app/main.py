@@ -1,0 +1,1584 @@
+# -*- coding: utf-8 -*-
+"""AI 工作信号灯 —— 桌面常驻状态灯
+
+无边框、常驻顶层、可拖拽的小挂件。
+上半区显示 AI 任务状态（五态信号灯），下半区显示 CPU / 内存 / 温度 / 网速。
+
+三套既定版式（右键 →样式）：
+  standard  标准卡：灯 + 状态 + 四列指标，信息最全
+  bar       横条：两行贴边，占屏最少
+  stack     竖版：窄而高，适合贴屏幕侧边
+
+四档尺寸（右键 →尺寸）：85% / 100% / 115% / 135%。
+尺寸不做自由拖拽——文字换行和列宽在非整数比例下必然错位，
+改为"整张卡片等比缩放"：所有坐标和字号都乘同一个系数，布局永远不变形。
+
+启动：python app/main.py
+演示：python app/main.py --demo     （循环切换五种状态，用于预览）
+"""
+
+from __future__ import annotations
+
+import math
+import os
+import sys
+import threading
+import time
+import traceback
+from pathlib import Path
+
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, QTimer
+from PySide6.QtGui import (
+    QAction,
+    QActionGroup,
+    QColor,
+    QFont,
+    QFontMetrics,
+    QGuiApplication,
+    QIcon,
+    QPainter,
+    QPen,
+    QPixmap,
+    QRadialGradient,
+)
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QInputDialog,
+    QMenu,
+    QSystemTrayIcon,
+    QWidget,
+)
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+import codex as codex_mod  # noqa: E402
+import cooling as cooling_mod  # noqa: E402
+import metrics as metrics_mod  # noqa: E402
+import state as st  # noqa: E402
+from cooling_ui import CoolingPanel, fmt_dur, fmt_short  # noqa: E402
+
+# ---------------- 版式 ----------------
+
+STYLE_STANDARD = "standard"
+STYLE_BAR = "bar"
+STYLE_STACK = "stack"
+
+STYLE_ORDER = (STYLE_STANDARD, STYLE_BAR, STYLE_STACK)
+STYLE_NAMES = {STYLE_STANDARD: "标准卡", STYLE_BAR: "横条", STYLE_STACK: "竖版"}
+STYLE_HINTS = {STYLE_STANDARD: "灯 + 四列指标", STYLE_BAR: "两行贴边", STYLE_STACK: "窄竖排"}
+
+# 基准尺寸（不含缩放）。实际窗口 = 基准 × scale。
+BASE_SIZE = {
+    STYLE_STANDARD: (400.0, 138.0),
+    STYLE_BAR: (320.0, 64.0),
+    STYLE_STACK: (200.0, 248.0),
+}
+
+# 尺寸档位：只给既有档位，不给连续缩放
+SCALE_STEPS = ((0.85, "小"), (1.0, "标准"), (1.15, "大"), (1.35, "超大"))
+
+# 散热条：只有存在散热会话时才出现在卡片底部。多出来的高度不算进基准尺寸，
+# 避免"有没有在散热"影响版式比例 —— 那会让每次开关风扇卡片都轻微变形。
+STRIP_STANDARD = 30.0
+STRIP_STACK = 34.0
+
+# 多任务并行：每个任务占一行（横条）或两行（标准卡/竖版：名称 + 指令）。
+# 上限 3 个 —— 常驻挂件不是任务管理器，再多就该去做窗口而不是贴屏幕。
+MAX_ROWS = 3
+
+# --demo 的步骤数：5 个单任务状态 + 1 个三任务并行
+DEMO_STEPS = 6
+
+MARGIN = 8  # 阴影留白
+
+# 任务名称里工作空间与对话名的分隔符
+TASK_SEP = " - "
+
+CARD_BG = QColor(15, 18, 23, 243)
+CARD_BORDER = QColor(46, 52, 63)
+TXT = QColor(232, 236, 242)
+TXT_DIM = QColor(124, 134, 150)
+TXT_FAINT = QColor(88, 97, 112)
+DIVIDER = QColor(34, 39, 47)
+TRACK = QColor(31, 36, 44)
+BAR_BLUE = QColor(62, 123, 214)
+AMBER = QColor(245, 158, 11)
+
+STATE_COLORS = {
+    st.IDLE: QColor(92, 100, 114),
+    st.RUNNING: QColor(56, 189, 248),
+    st.DONE: QColor(34, 197, 94),
+    st.WAITING: QColor(245, 158, 11),
+    st.FAILED: QColor(239, 68, 68),
+}
+
+SRC_NAMES = {
+    "adl": "AMD ADL",
+    "nvidia": "nvidia-smi",
+    "lhm": "LibreHardwareMonitor",
+    "psutil": "psutil",
+    "cmd": "自定义命令",
+}
+
+FONT_UI = "Microsoft YaHei UI"
+FONT_MONO = "Consolas"
+
+# 单实例互斥句柄，必须活到进程结束
+_MUTEX = None
+
+# 温度告警线：笔记本 CPU/APU 常年在 45~60，75 以上才算真热
+TEMP_WARN = 62.0
+TEMP_HOT = 78.0
+
+
+def _f(size: float, weight: int = QFont.Normal, family: str = FONT_UI) -> QFont:
+    """必须用 setPointSizeF：QFont(family, size) 只接受整数，会把 9.5 截成 9。"""
+    f = QFont(family)
+    f.setPointSizeF(float(size))
+    f.setWeight(QFont.Weight(weight))
+    return f
+
+
+def _row_key(s) -> tuple:
+    """判断"可见任务清单是否变化"用的指纹。
+
+    心跳会不断刷新 beat，但 beat 不影响显示内容 —— 把它算进来的话，
+    每次工具调用都会触发一次全量重绘与尺寸检查。
+    """
+    return (s.source, s.sid, s.state, s.title, s.workspace, s.detail, round(s.ts, 2))
+
+
+def fmt_elapsed(sec: float) -> str:
+    if sec < 1:
+        return "刚刚"
+    if sec < 60:
+        return f"{int(sec)}s"
+    m, s = divmod(int(sec), 60)
+    if m < 60:
+        return f"{m}m{s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m"
+
+
+class SignalLight(QWidget):
+    def __init__(self, demo: bool = False) -> None:
+        super().__init__()
+        self.settings = st.load_settings()
+        self.reader = st.StateReader()
+        self.codex = codex_mod.CodexWatcher()
+        self.metrics = metrics_mod.Metrics()
+        self.thermal = metrics_mod.Thermal(cmd=str(self.settings.get("temp_cmd") or ""))
+        self.cooling = cooling_mod.Cooling()
+        self.cool = None                  # 当前散热会话（None = 没在散热）
+        self.panel: CoolingPanel | None = None
+        self._stop_rect = QRectF()        # 散热条上的"停止"热区（基准坐标）
+        self.status = st.Status()
+        # 多任务并行：槽位可能同时有多个（不同工作空间 / 不同对话）。
+        # 之前的做法只取优先级最高的一个，其余折成"另有 N 个"——
+        # 这对"我现在同时交代了三件事"毫无帮助，所以改成逐行列出。
+        self.rows: list[st.Slot] = []
+        self._row_keys: list[tuple] = []
+        self._rows_shown = 0
+        self.style = self.settings.get("style", STYLE_STANDARD)
+        if self.style not in BASE_SIZE:
+            self.style = STYLE_STANDARD
+        self.scale = float(self.settings.get("scale", 1.0))
+        self._phase = 0.0
+        self._state_t0 = time.time()
+        self._prev_state = None
+        self._drag_from: QPoint | None = None
+        self._demo = demo
+        self._demo_idx = 0
+        self._demo_t0 = time.time()
+
+        self.setWindowFlags(
+            Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
+        )
+        self.setAttribute(Qt.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setWindowTitle("AI 工作信号灯")
+
+        self._build_tray()
+        self._apply_size()
+
+        # 位置：默认右下角；恢复旧位置后校正，防止副屏拔掉导致窗口跑到屏幕外
+        if self.settings.get("x") is not None:
+            self.move(int(self.settings["x"]), int(self.settings["y"]))
+        else:
+            self._park_bottom_right()
+        self._ensure_on_screen()
+
+        self.setWindowOpacity(float(self.settings.get("opacity", 0.96)))
+
+        # 动画 ~30fps
+        self._anim = QTimer(self)
+        self._anim.timeout.connect(self._tick)
+        self._anim.start(33)
+
+        # 资源采样 1s
+        self._res = QTimer(self)
+        self._res.timeout.connect(self._sample_metrics)
+        self._res.start(1000)
+        self._sample_metrics()
+
+        # 状态轮询 400ms
+        self._poll = QTimer(self)
+        self._poll.timeout.connect(self._poll_state)
+        self._poll.start(400)
+        self._poll_state()
+
+        # 散热会话轮询 500ms：读会话文件 + 维持 UI 心跳
+        self._cool = QTimer(self)
+        self._cool.timeout.connect(self._poll_cooling)
+        self._cool.start(500)
+        self._poll_cooling()
+
+        # 启动对账放后台：万一上次是崩溃退出，这里要拉起提权进程还原电源，
+        # 而 UAC 对话框会阻塞调用线程，不能卡在首屏上。
+        threading.Thread(target=self.cooling.reconcile, name="cool-reconcile", daemon=True).start()
+
+        if demo:
+            self._demo_t0 = time.time()
+            self._push_demo()
+
+    # ---------------- 生命周期 ----------------
+
+    def _base_size(self) -> tuple[float, float]:
+        """基准尺寸（不含缩放）。散热条与多任务行各自加高，不改变宽高比。"""
+        w, h = BASE_SIZE[self.style]
+        h += self._extra_h()
+        if self.cool is not None:
+            if self.style == STYLE_STANDARD:
+                h += STRIP_STANDARD
+            elif self.style == STYLE_STACK:
+                h += STRIP_STACK
+        return w, h
+
+    def _fit_rows(self) -> None:
+        """可见任务行数变了才动窗口大小，否则每次心跳都会重设尺寸。"""
+        n = min(len(self.rows), MAX_ROWS)
+        if n != self._rows_shown:
+            self._rows_shown = n
+            self._apply_size(keep_center=True)
+        self.update()
+
+    def _apply_size(self, keep_center: bool = False) -> None:
+        # 尺寸一变就把行数基线同步掉：换版式时高度是按当前 rows 重算的，
+        # 不同步的话 _fit_rows 会以为"行数没变"，之后再也不肯调高度。
+        self._rows_shown = min(len(self.rows), MAX_ROWS)
+        bw, bh = self._base_size()
+        k = self.scale
+        nw, nh = int(round(bw * k)), int(round(bh * k))
+        center = self.geometry().center() if keep_center and self.isVisible() else None
+        self.setFixedSize(nw, nh)
+        if center is not None:
+            # 换档后以原中心为锚点，否则窗口会向右下角"长出去"
+            self.move(center.x() - nw // 2, center.y() - nh // 2)
+            self._ensure_on_screen()
+
+    def _park_bottom_right(self) -> None:
+        geo = QGuiApplication.primaryScreen().availableGeometry()
+        self.move(geo.right() - self.width() - 32, geo.bottom() - self.height() - 48)
+
+    def _ensure_on_screen(self) -> None:
+        """恢复的位置若不在任何屏幕内（副屏拔掉/分辨率变化），退回主屏右下角。"""
+        r = self.frameGeometry()
+        for sc in QGuiApplication.screens():
+            if sc.availableGeometry().intersects(r):
+                return
+        self._park_bottom_right()
+
+    def _sample_metrics(self) -> None:
+        self.metrics.sample()
+
+    def _tick(self) -> None:
+        self._phase += 0.10
+        if self._demo:
+            now = time.time()
+            if now - self._demo_t0 > 3.0:
+                self._demo_t0 = now
+                self._demo_idx = (self._demo_idx + 1) % DEMO_STEPS
+                self._push_demo()
+        self.update()
+
+    def _push_demo(self) -> None:
+        # 三元组顺序与真实数据一致：工作空间 / 对话名 / 本轮指令。
+        # 最后一步故意放三个并行任务，用来检查多行布局与高度自动扩张。
+        seq = [
+            (st.RUNNING, "AI学习", "完善信号灯任务名称", "优化：显示的任务名称，改为工作空间 + 对话名"),
+            (st.DONE, "AI学习", "完善信号灯任务名称", "已完成"),
+            (st.WAITING, "工作-202602-Alexa提问采集", "采集竞品价格", "等待你确认是否覆盖同名文件"),
+            (st.FAILED, "消费理财", "抓取竞品价格", "接口返回 429"),
+            (st.IDLE, "", "", ""),
+        ]
+        self.reader._last_mtime = 1e18  # 阻断真实文件覆盖
+
+        if self._demo_idx >= len(seq):
+            now = time.time()
+            self.rows = [
+                st.Slot("workbuddy", "d1", st.RUNNING, "完善信号灯任务名称", "加多任务行显示",
+                        now - 95, 999, now, "AI学习"),
+                st.Slot("workbuddy", "d2", st.WAITING, "采集竞品价格", "等待确认覆盖同名文件",
+                        now - 260, 999, now, "工作-202602-Alexa提问采集"),
+                st.Slot("workbuddy", "d3", st.RUNNING, "月度账单归类", "读取 3 月流水",
+                        now - 20, 999, now, "消费理财"),
+            ]
+            self._row_keys = [_row_key(s) for s in self.rows]
+            self.status = st.compose(self.rows, st.Status())
+        else:
+            s, work, title, detail = seq[self._demo_idx]
+            self.rows = []
+            self._row_keys = []
+            self.reader._last = st.Status(
+                s, title, detail, time.time(), 999, False, 0.0, workspace=work,
+            )
+            self.status = self.reader._last
+            self.status = self.reader._last
+        self._on_state_change()  # 阻断真实文件覆盖
+        self.status = self.reader._last
+        self._on_state_change()
+
+    def _poll_state(self) -> None:
+        if self._demo:
+            return
+        # Codex 监听器自己写槽位，这里只需在它之后统一重读
+        self.codex.poll()
+        slots = st.read_slots()
+        single = self.reader.read()
+        new = st.compose(slots, single)
+        keys = [_row_key(s) for s in slots]
+        # 用 key 而不是对象比较：槽位每次心跳都会变 beat，
+        # 直接比对象会让"没变化"也判成变化，白白重设窗口。
+        if (new.state != self.status.state
+                or new.ts != self.status.ts
+                or new.peers != self.status.peers
+                or keys != self._row_keys):
+            self.status = new
+            self.rows = slots
+            self._row_keys = keys
+            self._on_state_change()
+
+    def _on_state_change(self) -> None:
+        if self.status.state != self._prev_state:
+            self._state_t0 = time.time()
+            self._prev_state = self.status.state
+        # 任务数变了要重算窗口高度；文案变了只需重绘
+        self._fit_rows()
+        # peers 变化也要刷新：托盘提示里会带出"另有 N 个"
+        self._update_tray()
+
+    # ---------------- 散热 ----------------
+
+    def _poll_cooling(self) -> None:
+        prev = self.cool
+        self.cool = self.cooling.poll()
+        note = self.cooling.take_notice()
+        if note:
+            self._notify(note)
+        if (prev is None) != (self.cool is None):
+            # 卡片高度变了：以中心为锚点缩放，避免"往上蹦"一下
+            if self.cool is None:
+                # 会话结束：立刻作废停止热区。不能只等下一次重绘 ——
+                # 窗口被托盘隐藏时根本不会重绘，那时热区还留着就是幽灵按钮。
+                self._stop_rect = QRectF()
+            self._apply_size(keep_center=True)
+            self.update()
+            self._update_tray()
+        elif prev is not None and self.cool is not None and (prev.mode != self.cool.mode):
+            self._update_tray()
+
+    def _notify(self, text: str) -> None:
+        try:
+            self.tray.showMessage("AI 工作信号灯 · 散热", text, QSystemTrayIcon.Information, 4000)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def start_cooling(self, mode: str) -> None:
+        ok, msg = self.cooling.start(mode)
+        self._notify(msg)
+        if ok:
+            QTimer.singleShot(600, self._poll_cooling)
+        self.update()
+
+    def stop_cooling(self) -> None:
+        _ok, msg = self.cooling.stop()
+        self._notify(msg)
+
+    def toggle_panel(self) -> None:
+        if self.panel is None:
+            self.panel = CoolingPanel(
+                self.cooling, self.metrics, self.thermal, parent=None,
+                on_change=self._poll_cooling,
+            )
+        if self.panel.isVisible():
+            self.panel.raise_()
+            self.panel.activateWindow()
+        else:
+            self.panel.show()
+        self.panel.raise_()
+
+    # ---------------- 绘制 ----------------
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setRenderHint(QPainter.TextAntialiasing, True)
+
+        # 每帧重置热区：切到横条后不再画"停止"，热区必须跟着失效，
+        # 否则会留下一块看不见但点得动的幽灵按钮。
+        self._stop_rect = QRectF()
+
+        k = self.scale
+        # 整张卡片等比缩放：所有绘制都写在"基准坐标"里，缩放交给画笔变换。
+        # 这样字号、圆角、进度条会一起缩放，不会出现某个元素没跟着变的情况。
+        p.scale(k, k)
+        bw, bh = self._base_size()
+        vw = min(bw, self.width() / k)
+        vh = min(bh, self.height() / k)
+        card = QRectF(MARGIN, MARGIN, vw - 2 * MARGIN, vh - 2 * MARGIN)
+
+        self._paint_card(p, card, 14.0 if self.style == STYLE_BAR else 16.0)
+
+        if self.style == STYLE_BAR:
+            self._paint_bar(p, card)
+        elif self.style == STYLE_STACK:
+            self._paint_stack(p, card)
+        else:
+            self._paint_standard(p, card)
+
+    def _paint_card(self, p: QPainter, card: QRectF, radius: float) -> None:
+        # 投影（三层近似）
+        p.setPen(Qt.NoPen)
+        for i, a in enumerate((18, 26, 34)):
+            g = i * 1.6
+            p.setBrush(QColor(0, 0, 0, a))
+            p.drawRoundedRect(card.adjusted(-g, -g * 0.5, g, g), radius + 2, radius + 2)
+
+        p.setBrush(CARD_BG)
+        p.setPen(QPen(CARD_BORDER, 1))
+        p.drawRoundedRect(card, radius, radius)
+        p.setPen(Qt.NoPen)
+
+    def _status_color(self) -> QColor:
+        c = STATE_COLORS.get(self.status.state, STATE_COLORS[st.IDLE])
+        if self.status.stale:
+            c = QColor(c.red(), c.green(), c.blue(), 110)
+        return c
+
+    def _status_label(self) -> str:
+        return "信号中断" if self.status.stale else self.status.label
+
+    # ---- 多任务：行数与高度 ----
+    def _extra_h(self) -> float:
+        """多任务带来的额外高度（基准坐标）。n=1 必须为 0，
+        否则单任务场景的窗口尺寸会跟着一起漂。"""
+        n = min(len(self.rows), MAX_ROWS)
+        if n <= 1:
+            return 0.0
+        if self.style == STYLE_STANDARD:
+            # 分隔线落在 16+30n（单任务是 56），差值即增量
+            return 30.0 * n - 40.0
+        if self.style == STYLE_BAR:
+            return 22.0 * (n - 1)
+        return 30.0 * (n - 1)
+
+    def _visible_rows(self) -> tuple[list, int]:
+        """返回 (要画的任务, 未画出的数量)。
+
+        超过上限时留最后一格做汇总，而不是把第 N+1 个挤进半行 ——
+        半行内容既读不清又占高度，不如明确告诉用户"还有几个"。
+        """
+        n = len(self.rows)
+        if n <= MAX_ROWS:
+            return self.rows, 0
+        keep = MAX_ROWS - 1
+        return self.rows[:keep], n - keep
+
+    def _task_line(self, p: QPainter, x: float, y: float, w: float, it,
+                   size: float, label_w: float, elapsed: bool = True,
+                   dot: bool = False) -> None:
+        """画一行任务：状态标记 + 工作空间·对话名 + 耗时（右对齐）。
+
+        dot=True 时用色点代替状态文字 —— 竖版只有 172px 内宽，
+        "进行中"三个字要吃掉 20% 的宽度，不值。
+        """
+        color = STATE_COLORS.get(it.state, STATE_COLORS[st.IDLE])
+        if dot:
+            p.setPen(Qt.NoPen)
+            p.setBrush(color)
+            p.drawEllipse(QRectF(x + 2, y + 5, 6, 6))
+        else:
+            f = _f(size, QFont.DemiBold)
+            p.setFont(f)
+            p.setPen(color if it.state != st.IDLE else TXT_DIM)
+            label = st.LABELS.get(it.state, it.state)
+            p.drawText(QRectF(x, y, max(label_w, QFontMetrics(f).horizontalAdvance(label) + 2), 15),
+                       Qt.AlignLeft | Qt.AlignVCenter, label)
+
+        tw = 0.0
+        if elapsed and it.state in (st.RUNNING, st.WAITING, st.FAILED) and it.ts:
+            el = fmt_elapsed(time.time() - it.ts)
+            if el:
+                tw = 44.0
+                p.setFont(_f(size - 1, QFont.Normal, FONT_MONO))
+                p.setPen(TXT_FAINT)
+                p.drawText(QRectF(x + w - tw, y, tw, 15),
+                           Qt.AlignRight | Qt.AlignVCenter, el)
+        # +3 是标签与名称之间的呼吸位：状态词宽度正好等于 label_w 时，
+        # 两个不同颜色的词会黏成一句，读起来像"进行中AI学习"。
+        name_x = x + label_w + 3
+        self._draw_name(p, QRectF(name_x, y, max(20.0, x + w - tw - 4 - name_x), 15),
+                        size, it.workspace, it.title)
+
+    def _more_line(self, p: QPainter, x: float, y: float, w: float,
+                   more: int, size: float) -> None:
+        p.setFont(_f(size))
+        p.setPen(TXT_FAINT)
+        p.drawText(QRectF(x, y, w, 15), Qt.AlignLeft | Qt.AlignVCenter,
+                   f"另有 {more} 个任务在跑（右键 → 任务清单）")
+
+    def _task_detail(self, p: QPainter, x: float, y: float, w: float, it,
+                     size: float) -> None:
+        detail = (it.detail or "").strip()
+        if not detail:
+            return
+        self._draw_elided(p, detail, _f(size), TXT_DIM, QRectF(x, y, w, 14))
+
+    # ---- 标准卡：400×138 ----
+    def _paint_standard(self, p: QPainter, card: QRectF) -> None:
+        rows, more = self._visible_rows()
+        if len(rows) > 1 or more:
+            self._paint_standard_multi(p, card, rows, more)
+            return
+        stt = self.status
+        color = self._status_color()
+        pad = 14.0
+
+        self._draw_lamp(p, card.left() + pad + 7, card.top() + 21, stt.state, color)
+
+        text_x = card.left() + pad + 27
+        row1_y = card.top() + 11
+        row2_y = card.top() + 31
+
+        f_label = _f(10, QFont.DemiBold)
+        p.setFont(f_label)
+        p.setPen(color if stt.state != st.IDLE else TXT_DIM)
+        label = self._status_label()
+        p.drawText(QRectF(text_x, row1_y, 92, 19), Qt.AlignLeft | Qt.AlignVCenter, label)
+        lw = QFontMetrics(f_label).horizontalAdvance(label)
+
+        # 第一行右：任务名称（工作空间 - 对话名，空状态不放假占位）
+        if stt.workspace or stt.title:
+            self._draw_task_name(
+                p,
+                QRectF(text_x + lw + 10, row1_y, card.right() - pad - text_x - lw - 10, 19),
+                9, align_right=True,
+            )
+
+        # 第二行左：细节（多源并发时带出其余任务数）
+        detail = stt.detail or ("等待任务信号" if stt.state == st.IDLE else "")
+        if stt.peers > 0:
+            detail = f"{detail} · 另有 {stt.peers} 个" if detail else f"另有 {stt.peers} 个任务"
+        elapsed_w = 62.0
+        self._draw_elided(
+            p, detail, _f(8.5), TXT_DIM,
+            QRectF(text_x, row2_y, card.right() - pad - text_x - elapsed_w, 16),
+        )
+
+        # 第二行右：已持续时间（DONE 不显示，"刚刚"没有信息量）
+        if stt.state in (st.RUNNING, st.WAITING, st.FAILED) and stt.ts:
+            el = fmt_elapsed(time.time() - stt.ts)
+            if el:
+                p.setFont(_f(8, QFont.Normal, FONT_MONO))
+                p.setPen(TXT_FAINT)
+                p.drawText(
+                    QRectF(card.right() - pad - elapsed_w, row2_y, elapsed_w, 16),
+                    Qt.AlignRight | Qt.AlignVCenter, el,
+                )
+
+        # 分隔线
+        p.setPen(QPen(DIVIDER, 1))
+        dy = card.top() + 56
+        p.drawLine(
+            QPoint(int(card.left() + pad), int(dy)),
+            QPoint(int(card.right() - pad), int(dy)),
+        )
+
+        self._paint_metrics_std(p, card, card.top() + 64)
+
+        self._paint_strip(p, card, card.top() + 118.0)
+
+    def _paint_metrics_std(self, p: QPainter, card: QRectF, y: float) -> None:
+        pad = 14.0
+        m = self.metrics
+        col_w = (card.width() - pad * 2) / 4.0
+        self._metric_col(
+            p, card.left() + pad, y, col_w, "CPU", f"{m.cpu:.0f}%",
+            f"{m.cores} 核" if m.cores else "", m.cpu,
+        )
+        self._metric_col(
+            p, card.left() + pad + col_w, y, col_w, "内存", f"{m.mem:.0f}%",
+            m.mem_gb, m.mem,
+        )
+        self._metric_col(
+            p, card.left() + pad + col_w * 2, y, col_w, "温度", self._temp_text(),
+            self._temp_note(), self.thermal.temp, TEMP_WARN, TEMP_HOT,
+        )
+        self._net_col(p, card.left() + pad + col_w * 3, y, col_w)
+
+    def _paint_standard_multi(self, p: QPainter, card: QRectF,
+                              rows: list, more: int) -> None:
+        """多任务：每个任务两行（标识行 + 指令行），不再画大灯。
+
+        大灯表达的是"唯一状态"，多任务同时存在 running / waiting 时它没有意义，
+        换成一行的状态标签 + 各自的耗时，信息更准。
+        """
+        pad = 14.0
+        x = card.left() + pad
+        inner = card.width() - pad * 2
+        # 状态词宽度 + 3px 间隙；指令行缩进与名称起点对齐
+        indent = 40.0 + 3.0
+        y = card.top() + 11.0
+        for it in rows:
+            self._task_line(p, x, y, inner, it, 9, 40.0)
+            self._task_detail(p, x + indent, y + 15, inner - indent - 44, it, 8.5)
+            y += 30.0
+        if more:
+            self._more_line(p, x, y, inner, more, 8.5)
+
+        lines = len(rows) + (1 if more else 0)
+        dy = card.top() + 16.0 + 30.0 * lines
+        p.setPen(QPen(DIVIDER, 1))
+        p.drawLine(QPoint(int(x), int(dy)), QPoint(int(card.right() - pad), int(dy)))
+
+        self._paint_metrics_std(p, card, dy + 8.0)
+        self._paint_strip(p, card, dy + 62.0)
+
+    # ---- 散热条（标准卡底部，仅在有会话时出现）----
+    def _paint_strip(self, p: QPainter, card: QRectF, y: float) -> None:
+        s = self.cool
+        if s is None:
+            self._stop_rect = QRectF()
+            return
+
+        pad = 14.0
+        p.setPen(QPen(DIVIDER, 1))
+        p.drawLine(
+            QPoint(int(card.left() + pad), int(y)),
+            QPoint(int(card.right() - pad), int(y)),
+        )
+
+        # 呼吸点：用信号灯同一套视觉语言，表示"有东西正被主动控制"
+        ph = self._phase
+        alpha = 120 + 90 * (0.5 + 0.5 * math.sin(ph * 2.2))
+        cx, cy = card.left() + pad + 4.0, y + 14.0
+        p.setPen(Qt.NoPen)
+        halo = QColor(AMBER)
+        halo.setAlpha(int(alpha * 0.35))
+        p.setBrush(halo)
+        p.drawEllipse(QRectF(cx - 5, cy - 5, 10, 10))
+        core = QColor(AMBER)
+        core.setAlpha(int(alpha))
+        p.setBrush(core)
+        p.drawEllipse(QRectF(cx - 2.4, cy - 2.4, 4.8, 4.8))
+
+        tx = cx + 9
+        f_label = _f(8.5, QFont.DemiBold)
+        p.setFont(f_label)
+        p.setPen(AMBER)
+        p.drawText(QRectF(tx, y + 5, 78, 18), Qt.AlignLeft | Qt.AlignVCenter, s.label)
+        lw = QFontMetrics(f_label).horizontalAdvance(s.label)
+
+        if s.has_deadline():
+            left = f"{fmt_dur(s.elapsed())} · 剩 {fmt_dur(s.remaining())}"
+        else:
+            left = f"已运行 {fmt_dur(s.elapsed())}"
+        p.setFont(_f(7.5, QFont.Normal, FONT_MONO))
+        p.setPen(TXT_DIM)
+        p.drawText(QRectF(tx + lw + 8, y + 5, 130, 18), Qt.AlignLeft | Qt.AlignVCenter, left)
+
+        # 停止热区：画出来就要能点，所以矩形存在这里给 mousePressEvent 用
+        bw, bh = 44.0, 18.0
+        r = QRectF(card.right() - pad - bw, y + 5, bw, bh)
+        self._stop_rect = r
+        border = QColor(AMBER)
+        border.setAlpha(120)
+        p.setBrush(QColor(245, 158, 11, 26))
+        p.setPen(QPen(border, 1))
+        p.drawRoundedRect(r, 9, 9)
+        p.setPen(AMBER)
+        p.setFont(_f(7.5, QFont.DemiBold))
+        p.drawText(r, Qt.AlignCenter, "停止")
+
+    # ---- 横条：320×64 ----
+    def _paint_bar(self, p: QPainter, card: QRectF) -> None:
+        rows, more = self._visible_rows()
+        if len(rows) > 1 or more:
+            self._paint_bar_multi(p, card, rows, more)
+            return
+        stt = self.status
+        color = self._status_color()
+        pad = 12.0
+
+        self._draw_lamp(p, card.left() + pad + 6, card.top() + 17, stt.state, color)
+
+        text_x = card.left() + pad + 22
+        f_label = _f(9.5, QFont.DemiBold)
+        p.setFont(f_label)
+        p.setPen(color if stt.state != st.IDLE else TXT_DIM)
+        label = self._status_label()
+        p.drawText(QRectF(text_x, card.top() + 7, 60, 19), Qt.AlignLeft | Qt.AlignVCenter, label)
+        lw = QFontMetrics(f_label).horizontalAdvance(label)
+
+        if stt.workspace or stt.title:
+            self._draw_task_name(
+                p,
+                QRectF(text_x + lw + 8, card.top() + 7, card.right() - pad - text_x - lw - 8, 19),
+                8.5, align_right=True,
+            )
+
+        # 第二行：左详情 + 右指标串 +（散热中时）一个停止按钮
+        micro = self._micro_metrics()
+        mw = QFontMetrics(_f(7, QFont.Normal, FONT_MONO)).horizontalAdvance(micro)
+        # 横条只有 64px 高，塞不下散热条，但不能因此没有停止入口 ——
+        # 用户的主力版式可能就是横条，只能右键停等于把"停止"藏起来了。
+        stop_w = 20.0 if self.cool is not None else 0.0
+        detail = stt.detail or ("等待任务信号" if stt.state == st.IDLE else "")
+        if stt.peers > 0:
+            detail = f"{detail} · 另有 {stt.peers} 个" if detail else f"另有 {stt.peers} 个任务"
+        self._draw_elided(
+            p, detail, _f(8), TXT_DIM,
+            QRectF(text_x, card.top() + 26,
+                   card.right() - pad - text_x - mw - stop_w - 10, 16),
+        )
+        p.setFont(_f(7, QFont.Normal, FONT_MONO))
+        p.setPen(TXT_FAINT)
+        p.drawText(
+            QRectF(card.right() - pad - stop_w - mw - 2, card.top() + 26, mw + 2, 16),
+            Qt.AlignRight | Qt.AlignVCenter, micro,
+        )
+        if stop_w:
+            r = QRectF(card.right() - pad - 13, card.top() + 27, 13, 13)
+            self._stop_rect = r
+            border = QColor(AMBER)
+            border.setAlpha(130)
+            p.setBrush(QColor(245, 158, 11, 30))
+            p.setPen(QPen(border, 1))
+            p.drawRoundedRect(r, 3.5, 3.5)
+            p.setPen(AMBER)
+            p.setFont(_f(8.5, QFont.DemiBold))
+            p.drawText(r, Qt.AlignCenter, "×")
+
+    def _paint_bar_multi(self, p: QPainter, card: QRectF,
+                         rows: list, more: int) -> None:
+        """多任务横条：一个任务一行，指标串压到最后一行。
+
+        横条本来就只给 64px，多任务时不再显示 detail —— 在 320px 宽里
+        "谁在跑"比"跑的是哪一条指令"更需要一眼看清。
+        """
+        pad = 12.0
+        x = card.left() + pad
+        inner = card.width() - pad * 2
+        y = card.top() + 6.0
+        for it in rows:
+            self._task_line(p, x, y, inner, it, 8.5, 36.0)
+            y += 22.0
+        if more:
+            self._more_line(p, x, y, inner, more, 8.0)
+            y += 22.0
+
+        micro = self._micro_metrics()
+        mw = QFontMetrics(_f(7, QFont.Normal, FONT_MONO)).horizontalAdvance(micro)
+        stop_w = 20.0 if self.cool is not None else 0.0
+        p.setFont(_f(7, QFont.Normal, FONT_MONO))
+        p.setPen(TXT_FAINT)
+        p.drawText(QRectF(card.right() - pad - stop_w - mw - 2, y, mw + 2, 16),
+                   Qt.AlignRight | Qt.AlignVCenter, micro)
+        if stop_w:
+            r = QRectF(card.right() - pad - 13, y + 1, 13, 13)
+            self._stop_rect = r
+            border = QColor(AMBER)
+            border.setAlpha(130)
+            p.setBrush(QColor(245, 158, 11, 30))
+            p.setPen(QPen(border, 1))
+            p.drawRoundedRect(r, 3.5, 3.5)
+            p.setPen(AMBER)
+            p.setFont(_f(8.5, QFont.DemiBold))
+            p.drawText(r, Qt.AlignCenter, "×")
+
+    def _micro_metrics(self) -> str:
+        """横条上的指标串：CPU · 内存 · 温度 · 下行。标签省到最短，靠符号自解释。
+
+        散热进行中时换成「散热剩余 + CPU + 温度」：横条只有 274px 可用，
+        硬塞五项会把左侧任务详情挤没。而在机器正被加热的时候，
+        内存和上行恰好是最不重要的两个数。
+        """
+        t = self.thermal.temp
+        temp = f"{t:.0f}°" if t is not None else "—"
+        if self.cool is not None:
+            head = f"散热{fmt_short(self.cool.remaining())}" if self.cool.has_deadline() else "散热中"
+            return f"{head} · CPU {self.metrics.cpu:.0f}% · {temp} · ↓{metrics_mod.fmt_rate(self.metrics.down)}"
+        return f"CPU {self.metrics.cpu:.0f}% · {self.metrics.mem:.0f}% · {temp} · ↓{metrics_mod.fmt_rate(self.metrics.down)}"
+
+    # ---- 竖版：200×248 ----
+    def _paint_stack(self, p: QPainter, card: QRectF) -> None:
+        rows, more = self._visible_rows()
+        multi = len(rows) > 1 or more
+        lines = len(rows) + (1 if more else 0) if multi else 1
+        shift = 30.0 * (lines - 1)
+        stt = self.status
+        color = self._status_color()
+        pad = 14.0
+
+        # 多任务时每行自带色点，大灯再占一块就纯属浪费 —— 而且会和
+        # 第一行的圆点挤在一起，看起来像两个灯叠着。
+        if not multi:
+            self._draw_lamp(p, card.left() + pad + 7, card.top() + 22, stt.state, color)
+
+        text_x = card.left() + pad + (0.0 if multi else 20.0)
+        p.setFont(_f(10, QFont.DemiBold))
+        p.setPen(color if stt.state != st.IDLE else TXT_DIM)
+        p.drawText(
+            QRectF(text_x, card.top() + 12, card.right() - pad - text_x, 19),
+            Qt.AlignLeft | Qt.AlignVCenter, self._status_label(),
+        )
+
+        inner_w = card.width() - pad * 2
+        if multi:
+            y = card.top() + 35.0
+            for it in rows:
+                self._task_line(p, card.left() + pad, y, inner_w, it, 8.5, 12.0, dot=True)
+                self._task_detail(p, card.left() + pad + 15.0, y + 15, inner_w - 15.0, it, 7.5)
+                y += 30.0
+            if more:
+                self._more_line(p, card.left() + pad, y, inner_w, more, 7.5)
+        else:
+            if stt.workspace or stt.title:
+                self._draw_task_name(
+                    p, QRectF(card.left() + pad, card.top() + 35, inner_w, 15), 8.5,
+                )
+            detail = stt.detail or ("等待任务信号" if stt.state == st.IDLE else "")
+            if stt.peers > 0:
+                detail = f"{detail} · 另有 {stt.peers} 个" if detail else f"另有 {stt.peers} 个任务"
+            if stt.state in (st.RUNNING, st.WAITING, st.FAILED) and stt.ts:
+                el = fmt_elapsed(time.time() - stt.ts)
+                if el:
+                    detail = f"{detail} · {el}" if detail else el
+            self._draw_elided(
+                p, detail, _f(7.5), TXT_FAINT,
+                QRectF(card.left() + pad, card.top() + 51, inner_w, 14),
+            )
+
+        p.setPen(QPen(DIVIDER, 1))
+        dy = card.top() + 73 + shift
+        p.drawLine(
+            QPoint(int(card.left() + pad), int(dy)),
+            QPoint(int(card.right() - pad), int(dy)),
+        )
+
+        m = self.metrics
+        y = card.top() + 84 + shift
+        row_h = 36.0
+        x = card.left() + pad
+        self._stack_row(p, x, y, inner_w, "CPU", f"{m.cpu:.0f}%",
+                        pct=m.cpu, sub=f"{m.cores} 核" if m.cores else "")
+        y += row_h
+        self._stack_row(p, x, y, inner_w, "内存", f"{m.mem:.0f}%", pct=m.mem, sub=m.mem_gb)
+        y += row_h
+        self._stack_row(p, x, y, inner_w, "温度", self._temp_text(),
+                        pct=self.thermal.temp, sub=self._temp_note(),
+                        warn=TEMP_WARN, hot=TEMP_HOT)
+        y += row_h
+        self._stack_row(p, x, y, inner_w, "网络",
+                        "↓" + metrics_mod.fmt_rate(m.down),
+                        sub="↑" + metrics_mod.fmt_rate(m.up))
+
+        if self.cool is not None:
+            self._paint_stack_strip(p, card, card.top() + 226.0 + shift)
+
+    def _paint_stack_strip(self, p: QPainter, card: QRectF, y: float) -> None:
+        s = self.cool
+        pad = 14.0
+        # 四行指标最后一行的副文字（↑上行）落在上一行下沿，分隔线必须让开，
+        # 否则"↑5.2K"会和"风扇全速"叠在一起 —— 这个位置是量出来的，不是估的。
+        p.setPen(QPen(DIVIDER, 1))
+        p.drawLine(
+            QPoint(int(card.left() + pad), int(y)),
+            QPoint(int(card.right() - pad), int(y)),
+        )
+
+        cx, cy = card.left() + pad + 3.0, y + 11.0
+        alpha = 120 + 90 * (0.5 + 0.5 * math.sin(self._phase * 2.2))
+        p.setPen(Qt.NoPen)
+        core = QColor(AMBER)
+        core.setAlpha(int(alpha))
+        p.setBrush(core)
+        p.drawEllipse(QRectF(cx - 2.4, cy - 2.4, 4.8, 4.8))
+
+        p.setFont(_f(8, QFont.DemiBold))
+        p.setPen(AMBER)
+        p.drawText(QRectF(cx + 9, y + 3, 76, 16), Qt.AlignLeft | Qt.AlignVCenter, s.label)
+
+        bw, bh = 40.0, 15.0
+        r = QRectF(card.right() - pad - bw, y + 3, bw, bh)
+        self._stop_rect = r
+        border = QColor(AMBER)
+        border.setAlpha(110)
+        p.setBrush(QColor(245, 158, 11, 22))
+        p.setPen(QPen(border, 1))
+        p.drawRoundedRect(r, 7.5, 7.5)
+        p.setPen(AMBER)
+        p.setFont(_f(7, QFont.DemiBold))
+        p.drawText(r, Qt.AlignCenter, "停止")
+
+        tip = f"剩 {fmt_dur(s.remaining())}" if s.has_deadline() else f"已运行 {fmt_dur(s.elapsed())}"
+        p.setFont(_f(7, QFont.Normal, FONT_MONO))
+        p.setPen(TXT_DIM)
+        p.drawText(
+            QRectF(card.left() + pad, y + 21, card.width() - pad * 2, 12),
+            Qt.AlignLeft | Qt.AlignVCenter, tip,
+        )
+
+    def _stack_row(
+        self, p: QPainter, x: float, y: float, w: float, label: str, value: str,
+        pct: float | None = None, sub: str = "", warn: float = 75.0, hot: float = 90.0,
+    ) -> None:
+        p.setFont(_f(7.5))
+        p.setPen(TXT_FAINT)
+        p.drawText(QRectF(x, y, w * 0.45, 12), Qt.AlignLeft | Qt.AlignVCenter, label)
+
+        vcol, bcol = self._level_color(pct, warn, hot)
+        p.setFont(_f(10, QFont.DemiBold, FONT_MONO))
+        p.setPen(vcol)
+        p.drawText(
+            QRectF(x + w * 0.45, y - 3, w * 0.55, 18),
+            Qt.AlignRight | Qt.AlignVCenter, value,
+        )
+        if pct is not None:
+            self._bar(p, x, y + 17, w, 3.0, pct / 100.0, bcol)
+        elif sub:
+            p.setFont(_f(7))
+            p.setPen(TXT_FAINT)
+            p.drawText(
+                QRectF(x + w * 0.55, y + 15, w * 0.45, 12),
+                Qt.AlignRight | Qt.AlignVCenter, sub,
+            )
+
+    def _metric_col(
+        self, p: QPainter, x: float, y: float, w: float, label: str,
+        value: str, sub: str, pct: float | None, warn: float = 75.0, hot: float = 90.0,
+    ) -> None:
+        p.setFont(_f(7.5))
+        p.setPen(TXT_FAINT)
+        p.drawText(QRectF(x, y, w, 12), Qt.AlignLeft | Qt.AlignVCenter, label)
+
+        vcol, bcol = self._level_color(pct, warn, hot)
+        p.setFont(_f(10.5, QFont.DemiBold, FONT_MONO))
+        p.setPen(vcol)
+        p.drawText(QRectF(x, y + 13, w, 18), Qt.AlignLeft | Qt.AlignVCenter, value)
+
+        if sub:
+            p.setFont(_f(7.5))
+            p.setPen(TXT_FAINT)
+            p.drawText(QRectF(x, y + 32, w, 12), Qt.AlignLeft | Qt.AlignVCenter, sub)
+
+        self._bar(p, x, y + 46, w - 6, 3.0, (pct or 0.0) / 100.0, bcol)
+
+    def _net_col(self, p: QPainter, x: float, y: float, w: float) -> None:
+        p.setFont(_f(7.5))
+        p.setPen(TXT_FAINT)
+        p.drawText(QRectF(x, y, w, 12), Qt.AlignLeft | Qt.AlignVCenter, "网络")
+
+        p.setFont(_f(10.5, QFont.DemiBold, FONT_MONO))
+        p.setPen(TXT)
+        p.drawText(
+            QRectF(x, y + 13, w, 18), Qt.AlignLeft | Qt.AlignVCenter,
+            "↓" + metrics_mod.fmt_rate(self.metrics.down),
+        )
+        p.setFont(_f(7.5))
+        p.setPen(TXT_FAINT)
+        p.drawText(
+            QRectF(x, y + 32, w, 12), Qt.AlignLeft | Qt.AlignVCenter,
+            "↑" + metrics_mod.fmt_rate(self.metrics.up),
+        )
+
+    def _level_color(self, pct: float | None, warn: float, hot: float) -> tuple[QColor, QColor]:
+        if pct is None:
+            return TXT_FAINT, BAR_BLUE
+        if pct >= hot:
+            return STATE_COLORS[st.FAILED], STATE_COLORS[st.FAILED]
+        if pct >= warn:
+            return STATE_COLORS[st.WAITING], STATE_COLORS[st.WAITING]
+        return TXT, BAR_BLUE
+
+    def _bar(self, p: QPainter, x: float, y: float, w: float, h: float,
+             frac: float, color: QColor) -> None:
+        p.setPen(Qt.NoPen)
+        p.setBrush(TRACK)
+        p.drawRoundedRect(QRectF(x, y, w, h), h / 2, h / 2)
+        fw = max(0.0, min(1.0, frac)) * w
+        if fw > 0.5:
+            p.setBrush(color)
+            p.drawRoundedRect(QRectF(x, y, max(h, fw), h), h / 2, h / 2)
+
+    def _temp_text(self) -> str:
+        t = self.thermal.temp
+        return f"{t:.0f}°" if t is not None else "—"
+
+    def _temp_note(self) -> str:
+        if self.thermal.temp is not None:
+            return self.thermal.label or "设备"
+        return "无传感器" if self.thermal.probed else ""
+
+    # 任务名称 = 工作空间 - 对话名。
+    # 为什么不合成一个字符串丢给 elidedText：宽度不够时它从右往左截，
+    # 恰好先砍掉对话名（信息主体），留下工作空间（长期不变的上下文）。
+    # 所以这里按真实可用宽度做决策：放得下就分段画，放不下只留对话名。
+    def _draw_name(self, p: QPainter, rect: QRectF, size: float, work: str, name: str,
+                   align_right: bool = False) -> None:
+        work = (work or "").strip()
+        name = (name or "").strip()
+        if not work and not name:
+            return
+        f = _f(size)
+        p.setFont(f)
+        fm = QFontMetrics(f)
+        h = rect.height()
+        side = Qt.AlignRight if align_right else Qt.AlignLeft
+
+        # 只有一段（工作空间或对话名）：直接画，省掉分隔符
+        if not work or not name:
+            p.setPen(TXT if name else TXT_DIM)
+            p.drawText(rect, side | Qt.AlignVCenter,
+                       fm.elidedText(name or work, Qt.ElideRight, int(rect.width())))
+            return
+
+        w_work = fm.horizontalAdvance(work)
+        w_sep = fm.horizontalAdvance(TASK_SEP)
+        w_name = fm.horizontalAdvance(name)
+        if w_work + w_sep + w_name > rect.width():
+            p.setPen(TXT)
+            p.drawText(rect, side | Qt.AlignVCenter,
+                       fm.elidedText(name, Qt.ElideRight, int(rect.width())))
+            return
+
+        x = rect.right() - (w_work + w_sep + w_name) if align_right else rect.left()
+        p.setPen(TXT_DIM)
+        p.drawText(QRectF(x, rect.top(), w_work + 1, h), Qt.AlignLeft | Qt.AlignVCenter, work)
+        x += w_work
+        p.setPen(TXT_FAINT)
+        p.drawText(QRectF(x, rect.top(), w_sep + 1, h), Qt.AlignLeft | Qt.AlignVCenter, TASK_SEP)
+        x += w_sep
+        p.setPen(TXT)
+        p.drawText(QRectF(x, rect.top(), w_name + 1, h), Qt.AlignLeft | Qt.AlignVCenter, name)
+
+    def _draw_task_name(self, p: QPainter, rect: QRectF, size: float,
+                        align_right: bool = False) -> None:
+        self._draw_name(p, rect, size, self.status.workspace, self.status.title, align_right)
+
+    def _draw_elided(self, p: QPainter, text: str, font: QFont, color: QColor,
+                     rect: QRectF, align_right: bool = False) -> None:
+        if not text:
+            return
+        p.setFont(font)
+        p.setPen(color)
+        fm = QFontMetrics(font)
+        elided = fm.elidedText(text, Qt.ElideRight, int(rect.width()))
+        p.drawText(rect, (Qt.AlignRight if align_right else Qt.AlignLeft) | Qt.AlignVCenter, elided)
+
+    def _draw_lamp(self, p: QPainter, cx: float, cy: float, state: str, color: QColor) -> None:
+        base = 6.5
+        ph = self._phase
+        t_since = time.time() - self._state_t0
+        r = base
+        glow = 60.0
+
+        if state == st.IDLE:
+            glow = 26 + 10 * (0.5 + 0.5 * math.sin(ph * 0.55))
+        elif state == st.RUNNING:
+            r = base + 0.7 * math.sin(ph * 2.0)
+            glow = 95 + 38 * (0.5 + 0.5 * math.sin(ph * 2.0))
+        elif state == st.WAITING:
+            blink = 0.5 + 0.5 * math.sin(ph * 2.6)
+            glow = 60 + 90 * blink
+            r = base + 1.4 * blink
+        elif state == st.DONE:
+            pulse = max(0.0, 1.0 - (t_since % 1.6) / 1.6)
+            glow = 110 + 80 * pulse
+            r = base + 0.9 * pulse
+        elif state == st.FAILED:
+            glow = 150 + 45 * (0.5 + 0.5 * math.sin(ph * 1.3))
+            r = base
+
+        # 外发光（半径 20：再大会压到右侧状态文字）
+        p.setPen(Qt.NoPen)
+        gr = QRadialGradient(cx, cy, 20)
+        c0 = QColor(color)
+        c0.setAlpha(int(max(0, min(255, glow))))
+        c1 = QColor(color)
+        c1.setAlpha(int(max(0, min(255, glow * 0.30))))
+        c2 = QColor(color)
+        c2.setAlpha(0)
+        gr.setColorAt(0.0, c0)
+        gr.setColorAt(0.45, c1)
+        gr.setColorAt(1.0, c2)
+        p.setBrush(gr)
+        p.drawEllipse(QRectF(cx - 20, cy - 20, 40, 40))
+
+        # running: 旋转弧
+        if state == st.RUNNING:
+            p.setBrush(Qt.NoBrush)
+            ring = QColor(color)
+            ring.setAlpha(170)
+            p.setPen(QPen(ring, 1.6, Qt.SolidLine, Qt.RoundCap))
+            rect = QRectF(cx - 12, cy - 12, 24, 24)
+            start = int((math.degrees(ph * 3.2)) % 360)
+            p.drawArc(rect, start * 16, 70 * 16)
+
+        # done: 扩散一环
+        if state == st.DONE and t_since < 1.1:
+            k = t_since / 1.1
+            p.setBrush(Qt.NoBrush)
+            rc = QColor(color)
+            rc.setAlpha(int(170 * (1 - k)))
+            p.setPen(QPen(rc, 1.6))
+            rr = 8 + 16 * k
+            p.drawEllipse(QRectF(cx - rr, cy - rr, rr * 2, rr * 2))
+
+        # 灯芯
+        p.setPen(Qt.NoPen)
+        core = QColor(color)
+        if state == st.IDLE:
+            core.setAlpha(190)
+        p.setBrush(core)
+        p.drawEllipse(QRectF(cx - r, cy - r, r * 2, r * 2))
+
+        # 高光
+        p.setBrush(QColor(255, 255, 255, 70))
+        p.drawEllipse(QRectF(cx - r * 0.42, cy - r * 0.62, r * 0.62, r * 0.5))
+
+    # ---------------- 交互 ----------------
+
+    def mousePressEvent(self, e) -> None:  # noqa: N802
+        if e.button() == Qt.LeftButton:
+            # 散热条上的"停止"是真按钮：命中它就不再进入拖拽，
+            # 否则会出现"想点停止结果把窗口拖走了"
+            if self._stop_rect.isValid():
+                pos = e.position()
+                base = (pos.x() / self.scale, pos.y() / self.scale)
+                if self._stop_rect.contains(QPointF(*base)):
+                    self.stop_cooling()
+                    e.accept()
+                    return
+            self._drag_from = e.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            e.accept()
+
+    def mouseMoveEvent(self, e) -> None:  # noqa: N802
+        if self._drag_from is not None and e.buttons() & Qt.LeftButton:
+            self.move(e.globalPosition().toPoint() - self._drag_from)
+            e.accept()
+
+    def mouseReleaseEvent(self, e) -> None:  # noqa: N802
+        if self._drag_from is not None:
+            self._drag_from = None
+            self.settings["x"] = self.x()
+            self.settings["y"] = self.y()
+            st.save_settings(self.settings)
+
+    def mouseDoubleClickEvent(self, e) -> None:  # noqa: N802
+        if e.button() == Qt.LeftButton:
+            self.toggle_collapse()
+
+    def contextMenuEvent(self, e) -> None:  # noqa: N802
+        self._menu().exec(e.globalPos())
+
+    def toggle_collapse(self) -> None:
+        """双击在标准卡与横条之间切换，保留原来的"折叠"手感。"""
+        self.set_style(STYLE_STANDARD if self.style == STYLE_BAR else STYLE_BAR)
+
+    def set_style(self, style: str) -> None:
+        if style not in BASE_SIZE:
+            return
+        self.style = style
+        self.settings["style"] = style
+        self.settings["collapsed"] = style == STYLE_BAR  # 兼容旧版本的字段
+        st.save_settings(self.settings)
+        self._apply_size(keep_center=True)
+        self.update()
+
+    def set_scale(self, scale: float) -> None:
+        self.scale = float(scale)
+        self.settings["scale"] = self.scale
+        st.save_settings(self.settings)
+        self._apply_size(keep_center=True)
+        self.update()
+
+    def set_on_top(self, on: bool) -> None:
+        self.settings["on_top"] = on
+        st.save_settings(self.settings)
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, on)
+        self.show()
+
+    def _menu(self) -> QMenu:
+        m = QMenu(self)
+        m.setStyleSheet(
+            """
+            QMenu { background:#12161C; color:#E8ECF2; border:1px solid #2E333C;
+                    border-radius:8px; padding:6px; font-family:'Microsoft YaHei UI'; font-size:12px; }
+            QMenu::item { padding:6px 18px 6px 14px; border-radius:5px; }
+            QMenu::item:selected { background:#213043; }
+            QMenu::item:disabled { color:#7C8696; }
+            QMenu::separator { height:1px; background:#242A33; margin:5px 8px; }
+            """
+        )
+        a_top = QAction("窗口置顶", m)
+        a_top.setCheckable(True)
+        a_top.setChecked(bool(self.settings.get("on_top", True)))
+        a_top.triggered.connect(lambda v: self._toggle_flag("on_top", v))
+        m.addAction(a_top)
+
+        m.addSeparator()
+
+        # 样式（三选一）
+        sm = m.addMenu("样式")
+        g1 = QActionGroup(sm)
+        g1.setExclusive(True)
+        for sid in STYLE_ORDER:
+            a = QAction(f"{STYLE_NAMES[sid]}   {STYLE_HINTS[sid]}", sm)
+            a.setCheckable(True)
+            a.setChecked(self.style == sid)
+            a.triggered.connect(lambda _c=False, s=sid: self.set_style(s))
+            g1.addAction(a)
+            sm.addAction(a)
+
+        # 尺寸（四档）
+        zm = m.addMenu("尺寸")
+        g2 = QActionGroup(zm)
+        g2.setExclusive(True)
+        for val, name in SCALE_STEPS:
+            a = QAction(f"{name}   {int(round(val * 100))}%", zm)
+            a.setCheckable(True)
+            a.setChecked(abs(self.scale - val) < 0.01)
+            a.triggered.connect(lambda _c=False, v=val: self.set_scale(v))
+            g2.addAction(a)
+            zm.addAction(a)
+
+        # 温度来源
+        tm = m.addMenu("温度")
+        info = QAction(self._temp_menu_text(), tm)
+        info.setEnabled(False)
+        tm.addAction(info)
+        a_re = QAction("重新检测传感器", tm)
+        a_re.triggered.connect(self._reprobe_temp)
+        tm.addAction(a_re)
+        a_cmd = QAction("自定义温度命令…", tm)
+        a_cmd.triggered.connect(self._ask_temp_cmd)
+        tm.addAction(a_cmd)
+
+        # 散热：原来独立的 FanSpin 脚本，现在是挂件里的一个模块
+        m.addMenu(self._cooling_menu(m))
+
+        # 任务清单：卡片上最多 3 行，其余的必须有个地方能看到。
+        # 全部做成不可点击的展示项 —— 这里只回答"现在有几个、分别是什么"。
+        tl = m.addMenu(f"任务清单（{len(self.rows)}）")
+        if not self.rows:
+            a_none = QAction("当前没有任务", tl)
+            a_none.setEnabled(False)
+            tl.addAction(a_none)
+        for it in self.rows[:8]:
+            nm = " - ".join(x for x in (it.workspace, it.title) if x) or "任务"
+            a_it = QAction(f"{st.LABELS.get(it.state, it.state)} · {nm}", tl)
+            a_it.setEnabled(False)
+            tl.addAction(a_it)
+        if len(self.rows) > 8:
+            a_more = QAction(f"…还有 {len(self.rows) - 8} 个", tl)
+            a_more.setEnabled(False)
+            tl.addAction(a_more)
+
+        m.addSeparator()
+        a_boot = QAction("开机自启", m)
+        a_boot.setCheckable(True)
+        a_boot.setChecked(self._autostart_enabled())
+        a_boot.triggered.connect(lambda v: self._set_autostart(v))
+        m.addAction(a_boot)
+
+        a_dir = QAction("打开状态目录", m)
+        a_dir.triggered.connect(self._open_dir)
+        m.addAction(a_dir)
+
+        a_demo = QAction("演示五种状态", m)
+        a_demo.triggered.connect(self._start_demo)
+        m.addAction(a_demo)
+
+        m.addSeparator()
+        a_quit = QAction("退出", m)
+        a_quit.triggered.connect(QApplication.quit)
+        m.addAction(a_quit)
+        return m
+
+    def _toggle_flag(self, key: str, value: bool) -> None:
+        if key == "on_top":
+            self.set_on_top(value)
+
+    def _cooling_menu(self, parent: QMenu) -> QMenu:
+        """散热菜单。所有不可用项都带原因，且不隐藏 ——
+        藏起来用户会以为功能丢了，显示"不可用（本机无此接口）"才是有效信息。"""
+        cap = self.cooling.cap
+        cm = QMenu("散热", parent)
+        s = self.cool
+
+        if s is not None:
+            info = f"当前：{s.label} · {fmt_dur(s.elapsed())}"
+            if s.has_deadline():
+                info += f" · 剩 {fmt_dur(s.remaining())}"
+            a = QAction(info, cm)
+            a.setEnabled(False)
+            cm.addAction(a)
+        else:
+            a = QAction(f"当前：{cap.summary()}", cm)
+            a.setEnabled(False)
+            cm.addAction(a)
+
+        cm.addSeparator()
+
+        a_panel = QAction("散热面板…", cm)
+        a_panel.triggered.connect(self.toggle_panel)
+        cm.addAction(a_panel)
+
+        cm.addSeparator()
+
+        for mode, label in (
+            (cooling_mod.MODE_EC, "风扇全速（EC 直控）"),
+            (cooling_mod.MODE_BURN, "持续负载（烧 CPU）"),
+            (cooling_mod.MODE_SPIN, "电源锁定（最小 100%）"),
+        ):
+            ok, why = cap.mode_state(mode)
+            text = label if ok else f"{label} · 不可用"
+            a = QAction(text, cm)
+            a.setEnabled(ok and s is None)
+            if not ok:
+                a.setToolTip(why)
+            elif mode == cooling_mod.MODE_EC:
+                a.setToolTip(cooling_mod.MODE_HINTS[mode])
+            a.triggered.connect(lambda _c=False, m=mode: self.start_cooling(m))
+            cm.addAction(a)
+
+        cm.addSeparator()
+
+        a_stop = QAction("停止并恢复", cm)
+        a_stop.setEnabled(s is not None)
+        a_stop.triggered.connect(self.stop_cooling)
+        cm.addAction(a_stop)
+
+        if cooling_mod.BACKUP_FILE.exists():
+            a_rest = QAction("还原电源设置（需管理员）", cm)
+            a_rest.triggered.connect(self._restore_power_async)
+            cm.addAction(a_rest)
+
+        a_re = QAction("重新检测散热能力", cm)
+        a_re.triggered.connect(self._reprobe_cooling)
+        cm.addAction(a_re)
+        return cm
+
+    def _reprobe_cooling(self) -> None:
+        self.cooling.cap.refresh(deep=True)
+        self._notify(self.cooling.cap.summary())
+
+    def _restore_power_async(self) -> None:
+        """还原电源要提权，UAC 对话框会阻塞调用线程 —— 不能让它卡住 30fps 绘制。"""
+        def run() -> None:
+            _ok, msg = self.cooling.restore_power()
+            self.cooling.post_notice(msg)
+
+        threading.Thread(target=run, name="cool-restore", daemon=True).start()
+
+    def _temp_menu_text(self) -> str:
+        t = self.thermal
+        if t.temp is not None:
+            src = SRC_NAMES.get(t.source, t.source or "?")
+            return f"当前：{t.label or '设备'} {t.temp:.0f}°（{src}）"
+        return "当前：检测中…" if not t.probed else "当前：无可用传感器"
+
+    def _reprobe_temp(self) -> None:
+        self.thermal.reprobe()
+
+    def _ask_temp_cmd(self) -> None:
+        cur = str(self.settings.get("temp_cmd") or "")
+        # 手动搭对话框而不是用 QInputDialog.getText：挂件是置顶的无边框窗口，
+        # 随手弹出的模态框可能被压在别的窗口后面，用户只能去任务栏找。
+        dlg = QInputDialog(self)
+        dlg.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        dlg.setInputMode(QInputDialog.TextInput)
+        dlg.setWindowTitle("自定义温度命令")
+        dlg.setLabelText("命令输出里第一个 15~115 的数字会当作温度（留空 = 自动检测）：")
+        dlg.setTextValue(cur)
+        dlg.resize(520, 130)
+        self.activateWindow()
+        if dlg.exec() != QDialog.Accepted:
+            return
+        cmd = dlg.textValue().strip()
+        self.settings["temp_cmd"] = cmd
+        st.save_settings(self.settings)
+        self.thermal.stop()
+        self.thermal = metrics_mod.Thermal(cmd=cmd)
+        self.update()
+
+    # ---------------- 系统集成 ----------------
+
+    def _build_tray(self) -> None:
+        self.tray = QSystemTrayIcon(self)
+        self.tray.setToolTip("AI 工作信号灯")
+        self.tray.setIcon(self._make_icon(STATE_COLORS[st.IDLE]))
+        self.tray.activated.connect(self._tray_click)
+        self.tray.show()
+
+    def _tray_click(self, reason) -> None:
+        if reason == QSystemTrayIcon.DoubleClick:
+            if self.isVisible():
+                self.hide()
+            else:
+                self.show()
+                self.raise_()
+
+    def _update_tray(self) -> None:
+        color = STATE_COLORS.get(self.status.state, STATE_COLORS[st.IDLE])
+        self.tray.setIcon(self._make_icon(color))
+        tip = "AI 工作信号灯\n" + self.status.label
+        rows, more = self._visible_rows()
+        if len(self.rows) > 1:
+            # 多任务：逐个列出来。托盘提示是唯一没有宽度限制的地方，
+            # 卡片上挤不下的信息在这里补全。
+            tip += f"\n{len(self.rows)} 个任务并行"
+            for it in rows:
+                nm = " - ".join(x for x in (it.workspace, it.title) if x) or "任务"
+                tip += f"\n  {st.LABELS.get(it.state, it.state)} · {nm}"
+            if more:
+                tip += f"\n  另有 {more} 个"
+        else:
+            # 第一行是「工作空间 - 对话名」，托盘里也按同样顺序给全，避免两处对不上
+            parts = [x for x in (self.status.workspace, self.status.title) if x]
+            if parts:
+                tip += " · " + " · ".join(parts)
+        if self.cool is not None:
+            line = f"散热：{self.cool.label}"
+            if self.cool.has_deadline():
+                line += f" · 剩 {fmt_dur(self.cool.remaining())}"
+            tip += "\n" + line
+        if self.thermal.temp is not None:
+            tip += f"\n{self.thermal.label or '温度'} {self.thermal.temp:.0f}°"
+        self.tray.setToolTip(tip)
+
+    @staticmethod
+    def _make_icon(color: QColor) -> QIcon:
+        pm = QPixmap(64, 64)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        p.setPen(Qt.NoPen)
+        g = QColor(color)
+        g.setAlpha(70)
+        p.setBrush(g)
+        p.drawEllipse(QRectF(4, 4, 56, 56))
+        p.setBrush(color)
+        p.drawEllipse(QRectF(14, 14, 36, 36))
+        p.end()
+        return QIcon(pm)
+
+    def _open_dir(self) -> None:
+        st.ensure_dir()
+        os.startfile(str(st.APP_DIR))  # noqa: S606
+
+    def _start_demo(self) -> None:
+        self._demo = True
+        self._demo_idx = 0
+        self._demo_t0 = time.time()
+        self._push_demo()
+
+    def _autostart_key(self):
+        import winreg
+
+        return winreg, r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+    def _autostart_enabled(self) -> bool:
+        try:
+            winreg, path = self._autostart_key()
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path) as k:
+                winreg.QueryValueEx(k, "AISignalLight")
+            return True
+        except Exception:
+            return False
+
+    def _set_autostart(self, on: bool) -> None:
+        try:
+            winreg, path = self._autostart_key()
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_SET_VALUE) as k:
+                if on:
+                    if getattr(sys, "frozen", False):
+                        # 打包后 sys.executable 就是 exe 本身，
+                        # __file__ 指向临时解压目录，绝不能写进自启命令
+                        cmd = f'"{sys.executable}"'
+                    else:
+                        pyw = Path(sys.executable).with_name("pythonw.exe")
+                        exe = pyw if pyw.exists() else Path(sys.executable)
+                        cmd = f'"{exe}" "{Path(__file__).resolve()}"'
+                    winreg.SetValueEx(k, "AISignalLight", 0, winreg.REG_SZ, cmd)
+                else:
+                    try:
+                        winreg.DeleteValue(k, "AISignalLight")
+                    except FileNotFoundError:
+                        pass
+        except Exception:
+            pass
+
+
+def _single_instance() -> bool:
+    """同一会话只允许一盏灯。
+
+    没有这道锁时，重复双击 exe 会叠出两盏：两张卡片的数字错开几个像素，
+    看起来像"重影"，实测踩过一次。
+    """
+    global _MUTEX
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+
+        k32 = ctypes.windll.kernel32
+        k32.CreateMutexW.restype = ctypes.c_void_p
+        k32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+        _MUTEX = k32.CreateMutexW(None, 0, "Local\\AISignalLight_Widget")
+        # 句柄刻意不释放：进程退出时系统自动回收
+        return k32.GetLastError() != 183  # ERROR_ALREADY_EXISTS
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def main() -> int:
+    demo = "--demo" in sys.argv
+    if not _single_instance():
+        return 0
+    app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
+    w = SignalLight(demo=demo)
+    w.show()
+
+    def _shutdown() -> None:
+        # 退出前必须发停止请求：agent 会自己还原风扇/电源，
+        # 但"发请求"这一步只有界面能做。不发的话要等 90 秒 UI 心跳超时。
+        if w.cool is not None:
+            cooling_mod.request_stop()
+        w.thermal.stop()
+        w.metrics.close()
+
+    app.aboutToQuit.connect(_shutdown)
+    return app.exec()
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception:
+        st.ensure_dir()
+        (st.APP_DIR / "app.log").write_text(traceback.format_exc(), encoding="utf-8")
+        raise

@@ -1,0 +1,27 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---- 打包产物 ----
+# exe 走 Release，不进仓库：单文件 46MB，clone 会明显变慢
+build/
+dist/
+
+# ---- 运行时数据 ----
+runtime/
+*.log
+hook.log
+
+# ---- 开发期截图（_dev 下只保留 .py）----
+_dev/*.png
+_dev/*.jpg
+_dev/*.gif
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
