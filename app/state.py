@@ -437,7 +437,37 @@ DEFAULT_SETTINGS = {
     "cool_minutes": 30,
     "burn_workers": 0,    # 0 = 按物理核数自动
     "cool_cycle": 8.9,    # EC 除尘计时重置周期（秒），小于 9 才会让风扇连续转
+
+    # 显示元素：两个区块各自可关，硬件指标还能逐列关。
+    # 关到底就是一张空卡片，所以 show_task 与"指标集合"至少留一个为真，
+    # load_settings 会做兜底（手改配置改坏了也能拉回来）。
+    "show_task": True,     # 区块1：AI 任务（灯 + 状态 + 名称 + 明细）
+    "show_metrics": True,  # 区块2：硬件指标（总开关）
+    "show_cpu": True,
+    "show_mem": True,
+    "show_temp": True,
+    "show_net": True,
 }
+
+# 指标列的顺序即绘制顺序，改这里就等于改三套版式的列顺序
+METRIC_KEYS = ("cpu", "mem", "temp", "net")
+SHOW_KEYS = ("show_task", "show_metrics") + tuple("show_" + k for k in METRIC_KEYS)
+
+
+def _as_bool(v, default: bool) -> bool:
+    """配置里的布尔量容错：手改成 "false" / 0 / "" 都要认，不能一律 bool()。"""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return bool(v)
+    if isinstance(v, str):
+        t = v.strip().lower()
+        if t in ("0", "false", "no", "off", "none", ""):
+            return False
+        if t in ("1", "true", "yes", "on"):
+            return True
+    return default
+
 
 
 def load_settings() -> dict:
@@ -483,7 +513,21 @@ def load_settings() -> dict:
         s["cool_cycle"] = 8.9
     if not 2.0 <= s["cool_cycle"] <= 30.0:
         s["cool_cycle"] = 8.9
+
+    for k in SHOW_KEYS:
+        s[k] = _as_bool(s.get(k), True)
+    # 两个区块都关 = 一张空卡片。真发生了（手改配置）就把任务区拉回来。
+    if not s["show_task"] and not (s["show_metrics"] and metric_keys_of(s)):
+        s["show_task"] = True
     return s
+
+
+def metric_keys_of(s: dict) -> tuple[str, ...]:
+    """从设置字典里取生效的指标列。总开关关掉时返回空。"""
+    if not s.get("show_metrics", True):
+        return ()
+    return tuple(k for k in METRIC_KEYS if s.get("show_" + k, True))
+
 
 
 def save_settings(data: dict) -> None:

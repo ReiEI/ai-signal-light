@@ -229,6 +229,72 @@ w._poll_state()
 app.processEvents()
 check("槽位清空后回到单行高度", w.height() == base_std, (w.height(), base_std))
 
+print("12) 显示元素开关：两区块各自可关，高度跟着缩")
+for sid in M.STYLE_ORDER:
+    w.set_style(sid)
+    w.settings.update(dict(st.DEFAULT_SETTINGS))
+    w._apply_size()
+    app.processEvents()
+    full = w.height()
+
+    w.set_show("show_task", False)
+    app.processEvents()
+    check(f"{sid} 关任务区后变矮", w.height() < full, (w.height(), full))
+    check(f"{sid} 关任务区后仍在屏内合理范围", 30 <= w.height() <= full, w.height())
+
+    w.set_show("show_metrics", False)
+    app.processEvents()
+    check(f"{sid} 两区块都关被拒绝", w.height() > 30 and w._task_on() is False,
+          (w.height(), w._task_on()))
+    check(f"{sid} 被拒绝后设置回滚", w.settings["show_metrics"] is True,
+          w.settings.get("show_metrics"))
+
+    w.set_show("show_task", True)
+    app.processEvents()
+    w.settings.update(dict(st.DEFAULT_SETTINGS))
+    w._apply_size()
+    app.processEvents()
+
+# 单个指标列：列数减少但高度不变（标准卡指标区高度是固定的）
+w.set_style(M.STYLE_STANDARD)
+w.settings.update(dict(st.DEFAULT_SETTINGS))
+w._apply_size()
+h_all = w.height()
+w.set_show("show_cpu", False)
+w.set_show("show_mem", False)
+w.set_show("show_temp", False)
+app.processEvents()
+check("只剩网络一列时高度不变", w.height() == h_all, (w.height(), h_all))
+check("生效指标只有 net", w._metric_keys() == ("net",), w._metric_keys())
+check("指标串只剩下行", "↓" in w._micro_metrics() and "CPU" not in w._micro_metrics(),
+      w._micro_metrics())
+
+w.settings.update(dict(st.DEFAULT_SETTINGS))
+w.set_show("show_metrics", False)
+app.processEvents()
+check("关硬件指标后指标串为空", w._micro_metrics() == "", repr(w._micro_metrics()))
+check("关硬件指标后卡片变矮", w.height() < h_all, (w.height(), h_all))
+
+w.settings.update(dict(st.DEFAULT_SETTINGS))
+w._apply_size()
+app.processEvents()
+
+print("13) 显示元素菜单项齐全")
+m = w._menu()
+tops = [a.text() for a in m.actions() if a.text()]
+check("菜单有显示元素入口", "显示元素" in tops, tops)
+vm = next((a.menu() for a in m.actions() if a.text() == "显示元素"), None)
+check("显示元素子菜单存在", vm is not None)
+if vm is not None:
+    items = [a.text() for a in vm.actions() if a.text()]
+    check("含 AI 任务项", any("AI 任务" in t for t in items), items)
+    mm = next((a.menu() for a in vm.actions() if "硬件指标" in a.text()), None)
+    check("硬件指标二级菜单存在", mm is not None, items)
+    if mm is not None:
+        subs = [a.text() for a in mm.actions() if a.text()]
+        for name in ("CPU", "内存", "温度", "网络"):
+            check(f"含 {name} 开关", name in subs, subs)
+
 print(f"\n结果: {ok} 通过 / {fail} 失败")
 st.write_state("idle")
 sys.exit(0 if fail == 0 else 1)

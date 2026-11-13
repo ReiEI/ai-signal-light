@@ -208,6 +208,47 @@ st.SETTINGS_FILE.write_text("{ this is not json", encoding="utf-8")
 s = st.load_settings()
 check("回落默认值", s["style"] == "standard" and s["scale"] == 1.0, s)
 
+print("16) 显示元素开关的默认值与容错")
+st.SETTINGS_FILE.unlink(missing_ok=True)
+s = st.load_settings()
+for k in ("show_task", "show_metrics", "show_cpu", "show_mem", "show_temp", "show_net"):
+    check(f"默认 {k}=True", s[k] is True, s[k])
+check("默认四列全开", st.metric_keys_of(s) == ("cpu", "mem", "temp", "net"),
+      st.metric_keys_of(s))
+
+# 手改配置写成字符串 "false" / 0，都要认；不认的话开关会"点了没反应"
+st.SETTINGS_FILE.write_text(
+    json.dumps({"show_metrics": "false", "show_cpu": 0, "show_mem": "off"}), encoding="utf-8"
+)
+s = st.load_settings()
+check("字符串 false 被识别", s["show_metrics"] is False, s["show_metrics"])
+check("数字 0 被识别", s["show_cpu"] is False, s["show_cpu"])
+check("off 被识别", s["show_mem"] is False, s["show_mem"])
+check("总开关关掉后无生效列", st.metric_keys_of(s) == (), st.metric_keys_of(s))
+
+# 两个区块都关是非法组合，必须把任务区拉回来
+st.SETTINGS_FILE.write_text(
+    json.dumps({"show_task": False, "show_metrics": False}), encoding="utf-8"
+)
+s = st.load_settings()
+check("两区块都关时强制开任务区", s["show_task"] is True, s["show_task"])
+
+st.SETTINGS_FILE.write_text(
+    json.dumps({"show_task": False, "show_metrics": True,
+                "show_cpu": False, "show_mem": False,
+                "show_temp": False, "show_net": False}),
+    encoding="utf-8",
+)
+s = st.load_settings()
+check("指标全关且任务区关时也救回来", s["show_task"] is True, s["show_task"])
+
+# 只关部分列：保留顺序，不受 JSON 键顺序影响
+st.SETTINGS_FILE.write_text(
+    json.dumps({"show_cpu": False, "show_net": True, "show_temp": False}), encoding="utf-8"
+)
+check("生效列按固定顺序", st.metric_keys_of(st.load_settings()) == ("mem", "net"),
+      st.metric_keys_of(st.load_settings()))
+
 shutil.rmtree(_TMP, ignore_errors=True)
 print(f"\n结果: {ok} 通过 / {bad} 失败")
 sys.exit(1 if bad else 0)
