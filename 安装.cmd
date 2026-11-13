@@ -8,7 +8,8 @@ if not exist ".venv" (
 )
 
 ".venv\Scripts\python.exe" -m pip install --upgrade pip
-".venv\Scripts\python.exe" -m pip install PySide6 psutil
+".venv\Scripts\python.exe" -m pip install -r requirements.txt
+if errorlevel 1 goto deperr
 ".venv\Scripts\python.exe" selftest.py
 
 echo.
@@ -17,6 +18,11 @@ pause
 exit /b 0
 
 :err
-echo [ERROR] Failed to create venv. Make sure Python 3.10+ is installed.
+echo [ERROR] Failed to create venv. Make sure Python 3.13 (64-bit) is installed.
+pause
+exit /b 1
+
+:deperr
+echo [ERROR] Dependency install failed. Check network / pip index settings.
 pause
 exit /b 1

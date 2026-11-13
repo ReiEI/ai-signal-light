@@ -31,7 +31,7 @@ if errorlevel 1 goto fail
 
 echo.
 echo [3/3] fan_agent.exe
-rem 必须单独打包：它要在提权上下文里运行，绝不能把 PySide6 一起拖进去
+rem Build separately on purpose: it runs elevated, so PySide6 must NOT be bundled
 ".venv\Scripts\python.exe" -m PyInstaller --noconfirm --onefile --windowed ^
     --paths app --hidden-import ecfan --hidden-import powerplan --hidden-import textio ^
     --name "fan_agent" --distpath dist --workpath build\agent fan_agent.py
