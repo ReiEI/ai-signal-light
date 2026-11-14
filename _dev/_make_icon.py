@@ -6,7 +6,8 @@
     .venv\\Scripts\\python.exe _dev\\_make_icon.py build A   # 出 png + ico（A 可换 B/C）
 
 设计约束：16~32px 下两个第三方 logo 必然糊，所以主形必须是红绿灯，
-品牌标记退化成底部两枚小色块 —— 小尺寸靠"三灯 + 两个点"传达信息。
+品牌标记退化成底部两枚徽章 —— 小尺寸靠"三灯 + 两个点"传达信息。
+Codex 侧必须是 assets/codex-knot.svg 的白色六瓣结，画法错了 _test_icon.py 会拦住。
 """
 from __future__ import annotations
 
@@ -18,13 +19,13 @@ from PySide6.QtGui import (
     QColor,
     QGuiApplication,
     QImage,
-    QLinearGradient,
     QPainter,
     QPainterPath,
     QPen,
     QRadialGradient,
     QPixmap,
 )
+from PySide6.QtSvg import QSvgRenderer
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "assets"
@@ -41,10 +42,9 @@ AMBER = QColor("#FFB020")
 GREEN = QColor("#2BD97C")
 INSET = QColor("#0A0D11")
 
-# Codex 官方色：#B1A7FF -> #7A9DFF -> #3941FF
-CX_TOP = QColor("#B1A7FF")
-CX_MID = QColor("#7A9DFF")
-CX_BOT = QColor("#3941FF")
+# Codex 标记取自用户提供的参考图：深灰底 #373737 + 白色六瓣交织结。
+# 之前按网络资料画的「蓝紫渐变团块 + >_」是错的，见 assets/codex-knot.svg 的说明。
+CX_TILE = QColor("#373737")
 
 
 def _wb_pixmap() -> QPixmap:
@@ -52,7 +52,18 @@ def _wb_pixmap() -> QPixmap:
     return pm.scaled(1024, 1024, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
 
+def _cx_renderer() -> QSvgRenderer:
+    """Codex 结形用矢量画，别拿 48px 截图放大。"""
+    global CX
+    if CX is None:
+        CX = QSvgRenderer(str(ASSETS / "codex-knot.svg"))
+        if not CX.isValid():
+            raise RuntimeError("assets/codex-knot.svg 无法解析")
+    return CX
+
+
 WB = None
+CX = None
 
 
 def rounded(p: QPainter, rect: QRectF, radius: float, fill: QColor, edge: QColor | None = None, edge_w: float = 0.0):
@@ -115,42 +126,22 @@ def wb_chip(p: QPainter, rect: QRectF) -> None:
 
 
 def codex_chip(p: QPainter, rect: QRectF) -> None:
-    """Codex 标记：白底圆角块 + 蓝紫渐变团块 + 白色 >_ 。"""
-    rounded(p, rect, rect.width() * 0.24, QColor("#F6F7FA"))
+    """Codex 标记：深灰圆角块 + 白色六瓣交织结（按用户提供的现行标记）。
 
-    inner = rect.adjusted(rect.width() * 0.14, rect.width() * 0.14, -rect.width() * 0.14, -rect.width() * 0.14)
-    g = QLinearGradient(inner.topLeft(), inner.bottomLeft())
-    g.setColorAt(0.0, CX_TOP)
-    g.setColorAt(0.45, CX_MID)
-    g.setColorAt(1.0, CX_BOT)
+    不是渐变团块，也没有终端提示符。矢量见 assets/codex-knot.svg；
+    形状已与参考截图做掩膜比对，IoU 0.79，_dev/_test_icon.py 会守住这条线。
+    """
+    rounded(p, rect, rect.width() * 0.24, CX_TILE)
 
-    # 官方轮廓是六瓣云团，此处用大圆角方块近似：小尺寸下二者无法区分
-    blob = QPainterPath()
-    blob.addRoundedRect(inner, inner.width() * 0.34, inner.width() * 0.34)
-    p.setBrush(g)
-    p.setPen(Qt.NoPen)
-    p.drawPath(blob)
-
+    pad = rect.width() * 0.155
+    inner = rect.adjusted(pad, pad, -pad, -pad)
     p.save()
-    p.setClipPath(blob)
-    pen = QPen(QColor(255, 255, 255), inner.width() * 0.105)
-    pen.setCapStyle(Qt.RoundCap)
-    pen.setJoinStyle(Qt.RoundJoin)
-    p.setPen(pen)
-
-    w, h = inner.width(), inner.height()
-    x0, y0 = inner.x(), inner.y()
-    chev = QPainterPath()
-    chev.moveTo(x0 + w * 0.30, y0 + h * 0.33)
-    chev.lineTo(x0 + w * 0.42, y0 + h * 0.50)
-    chev.lineTo(x0 + w * 0.30, y0 + h * 0.67)
-    p.drawPath(chev)
-
-    under = QPainterPath()
-    under.moveTo(x0 + w * 0.52, y0 + h * 0.67)
-    under.lineTo(x0 + w * 0.72, y0 + h * 0.67)
-    p.drawPath(under)
+    _cx_renderer().render(p, inner)
     p.restore()
+
+    p.setPen(QPen(QColor(255, 255, 255, 30), 3))
+    p.setBrush(Qt.NoBrush)
+    p.drawRoundedRect(rect, rect.width() * 0.24, rect.width() * 0.24)
 
 
 def lamps_in(p: QPainter, clip: QRectF, radius: float, items) -> None:

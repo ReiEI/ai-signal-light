@@ -132,5 +132,93 @@ if all((dist / e).exists() for e in exes):
 else:
     print("  SKIP  dist 里没有完整的三个 exe（源码态自检不做二进制检查）")
 
+print("7) Codex 标记：必须按参考图的六瓣结，别再退回渐变团块 + >_")
+from PySide6.QtCore import QRectF  # noqa: E402
+from PySide6.QtGui import QColor, QImage, QPainter  # noqa: E402
+from PySide6.QtSvg import QSvgRenderer  # noqa: E402
+
+svg_file = ROOT / "assets" / "codex-knot.svg"
+ref_file = ROOT / "assets" / "codex-knot-ref.png"
+check("结形矢量资产存在", svg_file.exists(), svg_file)
+check("参考掩膜资产存在", ref_file.exists(), ref_file)
+import xml.etree.ElementTree as ET  # noqa: E402
+
+svg_text = svg_file.read_text(encoding="utf-8")
+svg_root = ET.fromstring(svg_text)
+attr_values = [v for el in svg_root.iter() for v in el.attrib.values()]
+check(
+    "矢量显式白色（不依赖动态色值）",
+    svg_root.attrib.get("fill") == "#FFFFFF" and not any("currentColor" in v for v in attr_values),
+    svg_root.attrib.get("fill"),
+)
+check("矢量保持 24×24 viewBox", svg_root.attrib.get("viewBox") == "0 0 24 24", svg_root.attrib.get("viewBox"))
+check("SVG 可解析", QSvgRenderer(str(svg_file)).isValid())
+
+gen_src = (ROOT / "_dev" / "_make_icon.py").read_text(encoding="utf-8")
+chip_src = gen_src.split("def codex_chip", 1)[1].split("\ndef ", 1)[0]
+check("生成器不再引用蓝紫渐变", "CX_TOP" not in gen_src and "QLinearGradient" not in gen_src)
+check("codex_chip 改由矢量渲染", "_cx_renderer().render" in chip_src and "QSvgRenderer" in gen_src)
+check("codex_chip 不再自绘团块/提示符路径", "QPainterPath" not in chip_src and "chev" not in chip_src)
+
+
+def _white_mask(qimg: QImage) -> Image.Image:
+    buf = qimg.bits()
+    w, h = qimg.width(), qimg.height()
+    out = Image.new("L", (w, h), 0)
+    op = out.load()
+    for y in range(h):
+        row = y * w * 4
+        for x in range(w):
+            i = row + x * 4
+            b, g, r, a = buf[i], buf[i + 1], buf[i + 2], buf[i + 3]
+            op[x, y] = 255 if (a > 110 and min(b, g, r) > 190) else 0
+    return out
+
+
+def _norm(m: Image.Image, n: int = 256) -> Image.Image:
+    c = m.crop(m.getbbox())
+    s = min(n / c.width, n / c.height)
+    c = c.resize((round(c.width * s), round(c.height * s)), Image.LANCZOS)
+    out = Image.new("L", (n, n), 0)
+    out.paste(c, ((n - c.width) // 2, (n - c.height) // 2))
+    return out.point(lambda v: 255 if v > 110 else 0)
+
+
+def _iou(a: Image.Image, b: Image.Image) -> float:
+    aa, bb = a.tobytes(), b.tobytes()
+    inter = sum(1 for u, v in zip(aa, bb) if u and v)
+    union = sum(1 for u, v in zip(aa, bb) if u or v)
+    return inter / union if union else 0.0
+
+
+# 直接渲染真正出货的 codex_chip，而不是单独测 SVG 文件
+chip = QImage(512, 512, QImage.Format_ARGB32_Premultiplied)
+chip.fill(QColor(0, 0, 0, 0))
+painter = QPainter(chip)
+painter.setRenderHint(QPainter.Antialiasing, True)
+mk.codex_chip(painter, QRectF(0, 0, 512, 512))
+painter.end()
+
+tile = chip.pixelColor(256, 8)
+check(
+    "徽标底色是参考图的深灰，不是白底或蓝紫渐变",
+    tile.alpha() > 200 and max(tile.red(), tile.green(), tile.blue()) < 100,
+    (tile.red(), tile.green(), tile.blue(), tile.alpha()),
+)
+hole = chip.pixelColor(256, 256)
+check("六瓣结中央镂空", max(hole.red(), hole.green(), hole.blue()) < 100, (hole.red(), hole.green(), hole.blue()))
+
+mask = _norm(_white_mask(chip))
+check("结形可见面积合理", 0.15 < sum(1 for v in mask.tobytes() if v) / (256 * 256) < 0.70)
+rot60 = mask.rotate(60, resample=Image.BICUBIC).point(lambda v: 255 if v > 110 else 0)
+check("六瓣结具备 60° 旋转对称", _iou(mask, rot60) > 0.85, round(_iou(mask, rot60), 4))
+
+with Image.open(ref_file) as im:
+    check("参考掩膜是 256 灰度图", im.size == (256, 256) and im.mode == "L", (im.size, im.mode))
+    ref_mask = im.convert("L")
+score = _iou(ref_mask, mask)
+check("出货结形与参考图形状一致（IoU > 0.70）", score > 0.70, round(score, 4))
+print(f"      形状 IoU = {score:.4f}")
+
 print(f"\n结果: {ok} 通过 / {bad} 失败")
 sys.exit(1 if bad else 0)
