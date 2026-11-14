@@ -5,7 +5,7 @@ a = Analysis(
     ['app/main.py'],
     pathex=['app'],
     binaries=[],
-    datas=[],
+    datas=[('assets/signallight.ico', 'assets')],
     hiddenimports=['state', 'metrics', 'codex', 'cooling', 'cooling_ui', 'ecfan', 'powerplan', 'textio'],
     hookspath=[],
     hooksconfig={},
@@ -35,4 +35,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['assets/signallight.ico'],
 )
