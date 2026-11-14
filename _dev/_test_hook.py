@@ -230,7 +230,7 @@ run({
     "cwd": "D:/tmp/demo-ws", "transcript_path": tp1,
 })
 s = st.read_slot("workbuddy", "ws01")
-check("工作空间取目录名", s is not None and s.workspace == "demo-ws", s.workspace if s else None)
+check("无映射时工作空间为空（独立任务）", s is not None and s.workspace == "", s.workspace if s else None)
 check("标题取会话标题", s is not None and s.title == "完善信号灯多任务显示", s.title if s else None)
 check("第二行保留本轮指令", s is not None and s.detail == "把任务名称改一下", s.detail if s else None)
 
@@ -241,7 +241,7 @@ run({
     "cwd": "D:/tmp/demo-ws", "transcript_path": tp2,
 })
 s = st.read_slot("workbuddy", "ws02")
-check("首轮无标题时 title 留空", s is not None and s.title == "", s.title if s else None)
+check("独立任务首轮无标题时 title 用指令", s is not None and s.title == "先跑起来", s.title if s else None)
 with open(tp2, "a", encoding="utf-8") as f:
     f.write(json.dumps(ai_title("后来才生成的标题"), ensure_ascii=False) + "\n")
 run({
@@ -280,9 +280,27 @@ run({
     "prompt": "带工作空间但没标题", "cwd": "D:/tmp/demo-ws",
 })
 s = st.read_slot("workbuddy", "ws05")
-check("有工作空间时 title 留空避免两行重复",
-      s is not None and s.title == "" and s.workspace == "demo-ws",
+check("独立任务 title 用指令、不显示工作空间名",
+      s is not None and s.title == "带工作空间但没标题" and s.workspace == "",
       (s.title, s.workspace) if s else None)
+
+# 映射命中时工作空间名正常显示（反向：确认没把正常工作空间也砍掉）
+# 子进程读 AISIGNAL_HOME/workspace-display-names.json，直接写文件注入。
+ws_map_file = _TEST_HOME / "workspace-display-names.json"
+ws_map_file.write_text(
+    json.dumps({"workspaces": {"d:/tmp/demo-ws": {"displayName": "信号灯项目"}}}),
+    encoding="utf-8",
+)
+clean()
+run({
+    "hook_event_name": "UserPromptSubmit", "session_id": "ws06",
+    "prompt": "改一下标题", "cwd": "D:/tmp/demo-ws",
+})
+s = st.read_slot("workbuddy", "ws06")
+check("映射命中时工作空间取 displayName",
+      s is not None and s.workspace == "信号灯项目", s.workspace if s else None)
+check("有工作空间且无标题时 title 留空避免两行重复",
+      s is not None and s.title == "", s.title if s else None)
 
 shutil.rmtree(TR, ignore_errors=True)
 

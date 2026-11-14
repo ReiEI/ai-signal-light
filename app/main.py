@@ -1639,7 +1639,9 @@ class SignalLight(QWidget):
         a_boot = QAction("开机自启", m)
         a_boot.setCheckable(True)
         a_boot.setChecked(self._autostart_enabled())
-        a_boot.triggered.connect(lambda v: self._set_autostart(v))
+        # toggled 而非 triggered：triggered 有 () / (bool) 两个重载，
+        # lambda 单参数在 PySide6 可能匹配到无参版本导致静默失效。
+        a_boot.toggled.connect(self._set_autostart)
         m.addAction(a_boot)
 
         a_dir = QAction("打开状态目录", m)
@@ -1855,24 +1857,27 @@ class SignalLight(QWidget):
     def _set_autostart(self, on: bool) -> None:
         try:
             winreg, path = self._autostart_key()
-            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_SET_VALUE) as k:
-                if on:
-                    if getattr(sys, "frozen", False):
-                        # 打包后 sys.executable 就是 exe 本身，
-                        # __file__ 指向临时解压目录，绝不能写进自启命令
-                        cmd = f'"{sys.executable}"'
-                    else:
-                        pyw = Path(sys.executable).with_name("pythonw.exe")
-                        exe = pyw if pyw.exists() else Path(sys.executable)
-                        cmd = f'"{exe}" "{Path(__file__).resolve()}"'
-                    winreg.SetValueEx(k, "AISignalLight", 0, winreg.REG_SZ, cmd)
+            if on:
+                if getattr(sys, "frozen", False):
+                    # 打包后 sys.executable 就是 exe 本身，
+                    # __file__ 指向临时解压目录，绝不能写进自启命令
+                    cmd = f'"{sys.executable}"'
                 else:
-                    try:
+                    pyw = Path(sys.executable).with_name("pythonw.exe")
+                    exe = pyw if pyw.exists() else Path(sys.executable)
+                    cmd = f'"{exe}" "{Path(__file__).resolve()}"'
+                winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_SET_VALUE).close()
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_SET_VALUE) as k:
+                    winreg.SetValueEx(k, "AISignalLight", 0, winreg.REG_SZ, cmd)
+            else:
+                try:
+                    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_SET_VALUE) as k:
                         winreg.DeleteValue(k, "AISignalLight")
-                    except FileNotFoundError:
-                        pass
-        except Exception:
-            pass
+                except FileNotFoundError:
+                    pass
+            self._notify("已开机自启" if on else "已取消开机自启", "AI 工作信号灯")
+        except Exception as e:  # noqa: BLE001
+            self._notify(f"设置失败：{e}", "AI 工作信号灯")
 
 
 def _single_instance() -> bool:

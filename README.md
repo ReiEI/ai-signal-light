@@ -42,7 +42,7 @@ Windows 桌面常驻小挂件。无边框、始终置顶、可拖拽，用一盏
 | 第一行右 | `工作空间 - 对话名` | 工作空间名 + 会话标题 |
 | 第二行 | 这一轮的指令摘要 | `prompt` 剥掉引用块/@徽标后取前 40 字 |
 
-工作空间名取自 hook 传入的 `cwd`，优先查 `~/.workbuddy/workspace-display-names.json` 的 `displayName`（用户在 WorkBuddy 里改过名的以改名为准），查不到就退回目录名。
+工作空间名取自 hook 传入的 `cwd`，查 `~/.workbuddy/workspace-display-names.json` 的 `displayName`。**只认映射命中**：cwd 不在映射里说明这是独立任务/对话，工作空间名留空，第一行只显示对话名或指令——不再退回目录名（以前 `~/Downloads` 之类也会被冒充成工作空间名）。
 
 对话名取自 transcript 里的 `ai-title` 事件。这里有个坑值得记：**它固定在文件前 13KB 左右**（第 5 行），因为它在本轮第一次回复前就写好了；而一轮内的工具调用能追加几百 KB，从文件尾部反而读不到。所以读取顺序是"先扫头 64KB，再扫尾 24K/96K/384K 兜底"，实测 2.1ms。
 
@@ -487,6 +487,8 @@ AI工作信号灯/
 - **多行布局时状态词与任务名黏连**：`label_w` 正好等于"进行中"三个字的宽度，两个不同颜色会拼成"进行中AI学习"。现在名称起点固定 +3px。
 - **横条多任务时指标串被卡片下边缘裁掉**：行高 24 配 20px 增量，三行时把指标挤出边界。行高改 22、增量改 22。
 - **`_apply_size` 不同步 `_rows_shown`**：换版式时高度按当前 rows 重算，但基线没更新，导致之后 `_fit_rows` 认为"行数没变"，再也不肯调高度。
+- **`QAction.triggered` 信号在 PySide6 对 checkable action 可能不传 `checked`**：`triggered` 有 `()` / `(bool)` 两个重载，`lambda v:` 单参数连接可能匹配到无参版本导致 `_set_autostart` 收不到参数静默失效。改用 `toggled(bool)` 只有一个签名，不会歧义。
+- **独立任务的 cwd 被目录名冒充成工作空间名**：`_workspace_name` 在映射表找不到时退回目录名，`~/Downloads`、`/tmp` 之类都变成了"工作空间"。现在只认 `workspace-display-names.json` 映射命中，拿不到就留空。
 - **后台任务通知会伪装成用户输入**：按前缀识别系统注入，只续心跳、保留原标题与开始时间。
 - **`dataclasses` 让 hook 每次多花 150ms**：它连带 import `inspect`。状态层两个类改手写后从 500ms 降到 263ms。别为了省事改回去。
 - **Windows 上根本没有现成的温度接口**：只能挨个驱动接口试，最后在 AMD ADL 上拿到了真值。ADL 的 Overdrive5 在 APU 上返回 `-100`，能用的只有 `OverdriveN`，返回值是千分之一摄氏度。
@@ -505,7 +507,7 @@ AI工作信号灯/
 ```bat
 .venv\Scripts\python.exe selftest.py                  :: 21 项，状态机与 CLI
 .venv\Scripts\python.exe _dev\_test_sources.py        :: 37 项，多槽位 + Codex 解析
-.venv\Scripts\python.exe _dev\_test_hook.py           :: 50 项，Hook 进程级行为 + 工作空间/会话标题
+.venv\Scripts\python.exe _dev\_test_hook.py           :: 52 项，Hook 进程级行为 + 工作空间/会话标题
 .venv\Scripts\python.exe _dev\_test_thermal.py        :: 57 项，温度链路 + 外观/显示元素设置
 .venv\Scripts\python.exe _dev\_ui_smoke.py            :: 92 项，菜单/版式/尺寸/托盘/跨屏/多任务/显示开关/视觉层级
 .venv\Scripts\python.exe _dev\_test_cooling.py        :: 55 项，散热解析/会话/恢复/执行体/打包路径
@@ -514,7 +516,7 @@ AI工作信号灯/
 .venv\Scripts\python.exe _dev\_test_theme.py         :: 69 项，双调色板/对比度/系统联动/面板与托盘换色/视觉层级
 ```
 
-合计 466 项。其中 `_test_cooling.py` 真的起子进程跑执行体（到期、`stop.flag`、单实例互斥），`_test_cool_ui.py` 真的构造鼠标事件点"停止"热区，`_ui_smoke.py` 真的写槽位文件再走一遍 `_poll_state` —— 这几类只有跨进程/跨事件循环才测得到。
+合计 468 项。其中 `_test_cooling.py` 真的起子进程跑执行体（到期、`stop.flag`、单实例互斥），`_test_cool_ui.py` 真的构造鼠标事件点"停止"热区，`_ui_smoke.py` 真的写槽位文件再走一遍 `_poll_state` —— 这几类只有跨进程/跨事件循环才测得到。
 
 `_test_icon.py` 会渲染真正出货的 `codex_chip` / `wb_chip`，核对线框白色占比、无彩色块、三灯 hex 等于 `theme.STATE_HEX`，还会逐帧比对三个 exe 的 `RT_ICON`；只改代码不重打包，它会直接报"内嵌帧不匹配"。`_test_theme.py` 会模拟注册表返回浅/深，验证卡片、菜单、托盘、散热面板是否一起换色，并用 WCAG 对比度挡住"浅底浅字"。
 
