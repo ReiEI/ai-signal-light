@@ -1866,8 +1866,9 @@ class SignalLight(QWidget):
                     pyw = Path(sys.executable).with_name("pythonw.exe")
                     exe = pyw if pyw.exists() else Path(sys.executable)
                     cmd = f'"{exe}" "{Path(__file__).resolve()}"'
-                winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_SET_VALUE).close()
-                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_SET_VALUE) as k:
+                # CreateKeyEx 确保 Run 键存在，返回句柄直接写值；
+                # PyHKEY 只有 Close()/__exit__，没有小写 close()
+                with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_SET_VALUE) as k:
                     winreg.SetValueEx(k, "AISignalLight", 0, winreg.REG_SZ, cmd)
             else:
                 try:

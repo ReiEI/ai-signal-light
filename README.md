@@ -488,6 +488,7 @@ AI工作信号灯/
 - **横条多任务时指标串被卡片下边缘裁掉**：行高 24 配 20px 增量，三行时把指标挤出边界。行高改 22、增量改 22。
 - **`_apply_size` 不同步 `_rows_shown`**：换版式时高度按当前 rows 重算，但基线没更新，导致之后 `_fit_rows` 认为"行数没变"，再也不肯调高度。
 - **`QAction.triggered` 信号在 PySide6 对 checkable action 可能不传 `checked`**：`triggered` 有 `()` / `(bool)` 两个重载，`lambda v:` 单参数连接可能匹配到无参版本导致 `_set_autostart` 收不到参数静默失效。改用 `toggled(bool)` 只有一个签名，不会歧义。
+- **`winreg.PyHKEY` 没有小写 `close()`**：只有 `Close()` 和 `__exit__`（`with` 用）。`CreateKeyEx(...).close()` 直接 `AttributeError`。修法：`with winreg.CreateKeyEx(...) as k` 一步到位，确保存在 + 写值。自检里加了防回归规则。
 - **独立任务的 cwd 被目录名冒充成工作空间名**：`_workspace_name` 在映射表找不到时退回目录名，`~/Downloads`、`/tmp` 之类都变成了"工作空间"。现在只认 `workspace-display-names.json` 映射命中，拿不到就留空。
 - **后台任务通知会伪装成用户输入**：按前缀识别系统注入，只续心跳、保留原标题与开始时间。
 - **`dataclasses` 让 hook 每次多花 150ms**：它连带 import `inspect`。状态层两个类改手写后从 500ms 降到 263ms。别为了省事改回去。
@@ -509,14 +510,14 @@ AI工作信号灯/
 .venv\Scripts\python.exe _dev\_test_sources.py        :: 37 项，多槽位 + Codex 解析
 .venv\Scripts\python.exe _dev\_test_hook.py           :: 52 项，Hook 进程级行为 + 工作空间/会话标题
 .venv\Scripts\python.exe _dev\_test_thermal.py        :: 57 项，温度链路 + 外观/显示元素设置
-.venv\Scripts\python.exe _dev\_ui_smoke.py            :: 92 项，菜单/版式/尺寸/托盘/跨屏/多任务/显示开关/视觉层级
+.venv\Scripts\python.exe _dev\_ui_smoke.py            :: 95 项，菜单/版式/尺寸/托盘/跨屏/多任务/显示开关/视觉层级/自启防回归
 .venv\Scripts\python.exe _dev\_test_cooling.py        :: 55 项，散热解析/会话/恢复/执行体/打包路径
 .venv\Scripts\python.exe _dev\_test_cool_ui.py        :: 27 项，散热菜单/散热条/停止热区/面板
 .venv\Scripts\python.exe _dev\_test_icon.py          :: 58 项，图标资产/线框/无底色/状态灯实色/exe 内嵌帧
 .venv\Scripts\python.exe _dev\_test_theme.py         :: 69 项，双调色板/对比度/系统联动/面板与托盘换色/视觉层级
 ```
 
-合计 468 项。其中 `_test_cooling.py` 真的起子进程跑执行体（到期、`stop.flag`、单实例互斥），`_test_cool_ui.py` 真的构造鼠标事件点"停止"热区，`_ui_smoke.py` 真的写槽位文件再走一遍 `_poll_state` —— 这几类只有跨进程/跨事件循环才测得到。
+合计 471 项。其中 `_test_cooling.py` 真的起子进程跑执行体（到期、`stop.flag`、单实例互斥），`_test_cool_ui.py` 真的构造鼠标事件点"停止"热区，`_ui_smoke.py` 真的写槽位文件再走一遍 `_poll_state` —— 这几类只有跨进程/跨事件循环才测得到。
 
 `_test_icon.py` 会渲染真正出货的 `codex_chip` / `wb_chip`，核对线框白色占比、无彩色块、三灯 hex 等于 `theme.STATE_HEX`，还会逐帧比对三个 exe 的 `RT_ICON`；只改代码不重打包，它会直接报"内嵌帧不匹配"。`_test_theme.py` 会模拟注册表返回浅/深，验证卡片、菜单、托盘、散热面板是否一起换色，并用 WCAG 对比度挡住"浅底浅字"。
 
