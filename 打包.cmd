@@ -16,6 +16,8 @@ echo.
 echo [1/3] SignalLight.exe
 ".venv\Scripts\python.exe" -m PyInstaller --noconfirm --onefile --windowed ^
     --paths app ^
+    --icon "assets\signallight.ico" ^
+    --add-data "assets\signallight.ico;assets" ^
     --hidden-import state --hidden-import metrics --hidden-import codex ^
     --hidden-import cooling --hidden-import cooling_ui ^
     --hidden-import ecfan --hidden-import powerplan --hidden-import textio ^
@@ -26,6 +28,7 @@ echo.
 echo [2/3] signal.exe
 ".venv\Scripts\python.exe" -m PyInstaller --noconfirm --onefile --console ^
     --paths app --hidden-import state --hidden-import textio ^
+    --icon "assets\signallight.ico" ^
     --name "signal" --distpath dist --workpath build\signal signal.py
 if errorlevel 1 goto fail
 
@@ -34,6 +37,7 @@ echo [3/3] fan_agent.exe
 rem Build separately on purpose: it runs elevated, so PySide6 must NOT be bundled
 ".venv\Scripts\python.exe" -m PyInstaller --noconfirm --onefile --windowed ^
     --paths app --hidden-import ecfan --hidden-import powerplan --hidden-import textio ^
+    --icon "assets\signallight.ico" ^
     --name "fan_agent" --distpath dist --workpath build\agent fan_agent.py
 if errorlevel 1 goto fail
 

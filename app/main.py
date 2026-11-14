@@ -68,6 +68,21 @@ STYLE_ORDER = (STYLE_STANDARD, STYLE_BAR, STYLE_STACK)
 STYLE_NAMES = {STYLE_STANDARD: "标准卡", STYLE_BAR: "横条", STYLE_STACK: "竖版"}
 STYLE_HINTS = {STYLE_STANDARD: "灯 + 指标列", STYLE_BAR: "两行贴边", STYLE_STACK: "窄竖排"}
 
+
+def app_icon() -> QIcon:
+    """窗口 / 任务栏图标。
+
+    exe 内嵌图标只决定文件管理器里看到的那张图；Qt 窗口得自己 setWindowIcon，
+    否则任务栏会落回 Qt 默认图标。冻结后资源在 _MEIPASS，源码跑时在仓库根。
+    资源缺失时返回空 QIcon —— 图标不该让程序起不来。
+    """
+    if getattr(sys, "frozen", False):
+        base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    else:
+        base = Path(__file__).resolve().parent.parent
+    ico = base / "assets" / "signallight.ico"
+    return QIcon(str(ico)) if ico.exists() else QIcon()
+
 # 基准尺寸（不含缩放）。实际窗口 = 基准 × scale。
 BASE_SIZE = {
     STYLE_STANDARD: (400.0, 138.0),
@@ -1726,7 +1741,9 @@ def main() -> int:
         return 0
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+    app.setWindowIcon(app_icon())
     w = SignalLight(demo=demo)
+    w.setWindowIcon(app_icon())
     w.show()
 
     def _shutdown() -> None:

@@ -374,11 +374,37 @@ dist\fan_agent.exe --mode spin --minutes 30      :: 需要管理员
 dist\fan_agent.exe --mode restore                :: 只还原电源设置
 ```
 
+## 软件图标
+
+<img src="assets/signallight.png" width="112" alt="AI 工作信号灯图标">
+
+主形是横排红黄绿三灯，绿灯点亮（当前有任务在跑）；下方两枚徽标分别是 WorkBuddy 官方绿色图块和 Codex 的蓝紫 `>_`，表示两个自动接入来源。
+
+**为什么把品牌缩小**：图标主要在 16–32px 出现（任务栏、托盘、资源管理器）。两个第三方 logo 在这个尺寸必然糊成一团，所以让三灯承担识别、品牌退化成两枚色块；`>_` 要到 128px 以上才看得清。这是取舍，不是画质问题 —— 真要每个尺寸都清晰，就得放弃「图标里塞两个 logo」这个要求。
+
+| 文件 | 用途 |
+|---|---|
+| `assets/signallight.png` | 1024 母版 |
+| `assets/signallight.ico` | 9 档尺寸（16/20/24/32/40/48/64/128/256），三个 exe 的资源图标 + Qt 窗口图标 |
+| `assets/workbuddy.png` | 品牌原图，仅生成图标时用到 |
+
+托盘里那颗随状态变色的圆点没有换：它是状态提示位，不是品牌位。
+
+重新生成（需在项目 venv 里装 `pillow`，只用于写 ICO，程序本身不依赖它）：
+
+```bat
+.venv\Scripts\python.exe _dev\_make_icon.py preview   :: 出 A/B/C 三方案 × 六尺寸对比图
+.venv\Scripts\python.exe _dev\_make_icon.py build A   :: 出 png + ico，A 可换 B/C
+```
+
+> WorkBuddy 与 Codex 的名称和标记归各自权利人所有，此处仅用于说明兼容性，不代表背书、合作或隶属关系。
+
 ## 目录结构
 
 ```
 AI工作信号灯/
 ├─ LICENSE             MIT 许可证
+├─ assets/              图标母版 / ico / 品牌原图
 ├─ dist/                打包产物（不进仓库，由 打包.cmd 生成）
 │  ├─ SignalLight.exe   挂件本体（单文件，免 Python）
 │  ├─ signal.exe        状态写入 CLI（单文件，免 Python）
@@ -492,5 +518,7 @@ AI工作信号灯/
 |---|---|---|
 | PySide6 / Qt | LGPLv3（另有商业许可） | 随 exe 分发时以动态库形式解压加载，需随附 LGPL 文本，并保证用户可替换 Qt 库文件 |
 | psutil | BSD-3-Clause | 保留版权与免责声明 |
+
+项目图标内含 WorkBuddy 与 Codex 的品牌标记，**不属于 MIT 授权范围**，仅用于说明本工具兼容这两个来源；商标权归各自权利人。自用无所谓，若要改名、商用或再分发带这些标记的 exe，先自行确认商标使用合规，最省事的做法是换掉 `assets/` 里的素材重新生成图标。
 
 > 上面只是提示，具体合规判断请以各自许可证原文为准。纯自用不涉及分发，可以不管这一段；要把 exe 发给别人或商用，值得花十分钟确认一遍。
