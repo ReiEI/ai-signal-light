@@ -117,7 +117,7 @@ app.processEvents()
 check("置顶切换未崩溃", w.isVisible())
 
 print("7) 托盘图标生成")
-ic = w._make_icon(M.STATE_COLORS[st.FAILED])
+ic = w._make_icon(M.PAL.state(st.FAILED))
 check("图标非空", not ic.isNull())
 
 print("8) 状态更新驱动托盘提示")

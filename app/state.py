@@ -431,6 +431,8 @@ DEFAULT_SETTINGS = {
     "scale": 1.0,
     "collapsed": False,   # 旧字段，仅用于把老配置迁移成 style=bar
     "opacity": 0.96,
+    # 主题：auto 跟随 Windows 应用模式，也可手动锁浅/深。
+    "theme": "auto",
     "temp_cmd": "",
     # 散热模块：默认 30 分钟自动收手。这个值不是"选项"，是安全边界 ——
     # 笔记本被锁在 100% 最小处理器状态过夜，第二天电池和风扇都受不了。
@@ -485,6 +487,10 @@ def load_settings() -> dict:
         s["style"] = "bar"
     if s.get("style") not in STYLE_IDS:
         s["style"] = "standard"
+
+    # 手改坏的主题值一律回到跟随系统，不要让界面落到未知档位
+    if s.get("theme") not in ("auto", "light", "dark"):
+        s["theme"] = "auto"
 
     try:
         s["scale"] = float(s.get("scale") or 1.0)

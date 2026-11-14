@@ -18,7 +18,7 @@ echo [1/3] SignalLight.exe
     --paths app ^
     --icon "assets\signallight.ico" ^
     --add-data "assets\signallight.ico;assets" ^
-    --hidden-import state --hidden-import metrics --hidden-import codex ^
+    --hidden-import state --hidden-import theme --hidden-import metrics --hidden-import codex ^
     --hidden-import cooling --hidden-import cooling_ui ^
     --hidden-import ecfan --hidden-import powerplan --hidden-import textio ^
     --name "SignalLight" --distpath dist --workpath build\widget app\main.py
