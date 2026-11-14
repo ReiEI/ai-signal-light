@@ -159,7 +159,11 @@ chip_src = gen_src.split("def codex_chip", 1)[1].split("\ndef ", 1)[0]
 check("生成器不再引用蓝紫渐变", "CX_TOP" not in gen_src and "QLinearGradient" not in gen_src)
 check("codex_chip 改由矢量描边渲染", "_cx_renderer(stroke=True).render" in chip_src and "QSvgRenderer" in gen_src)
 check("codex_chip 不再自绘团块/提示符路径", "QPainterPath" not in chip_src and "chev" not in chip_src)
-check("两枚徽标共用线框底板", "def chip_frame(" in gen_src and gen_src.count("chip_frame(p, rect)") == 2)
+check("两枚徽标不再垫额外底板", "CHIP_BG" not in gen_src
+      and "def chip_frame(" not in gen_src
+      and gen_src.count("_brand_inner(rect)") == 2, gen_src.count("_brand_inner(rect)"))
+check("徽标边长放大到 320px", "BRAND_W = 320.0" in gen_src)
+check("徽标几何仍成对对称排布", "BRAND_GAP" in gen_src and "BRAND_Y" in gen_src)
 
 
 def _white_mask(qimg: QImage) -> Image.Image:
@@ -208,7 +212,7 @@ def white_ratio(q: QImage) -> float:
 
 
 def colored_samples(q: QImage) -> int:
-    """品牌彩色块留下的像素：白线框 + 深灰底不该有任何高饱和颜色。"""
+    """品牌彩色块留下的像素：纯白线框不该有任何高饱和颜色。"""
     n = 0
     for y in range(0, 512, 3):
         for x in range(0, 512, 3):
@@ -221,18 +225,21 @@ def colored_samples(q: QImage) -> int:
 chip = render_chip(mk.codex_chip)
 wb_chip = render_chip(mk.wb_chip)
 
-tile = chip.pixelColor(256, 8)
+corner = chip.pixelColor(6, 6)
+edge = chip.pixelColor(256, 8)
 check(
-    "徽标底色是深灰，不是白底或蓝紫渐变",
-    tile.alpha() > 200 and max(tile.red(), tile.green(), tile.blue()) < 100,
-    (tile.red(), tile.green(), tile.blue(), tile.alpha()),
+    "徽标角落透明：没有额外的深灰圆角底板",
+    corner.alpha() < 20 and edge.alpha() < 20,
+    (corner.alpha(), edge.alpha()),
 )
 hole = chip.pixelColor(256, 256)
 check("六瓣结中央镂空", max(hole.red(), hole.green(), hole.blue()) < 100, (hole.red(), hole.green(), hole.blue()))
 
 r_cx, r_wb = white_ratio(chip), white_ratio(wb_chip)
-check("Codex 徽标是白色线框而非实心填充", 0.05 < r_cx < 0.22, round(r_cx, 4))
-check("WorkBuddy 徽标是白色线框而非原生 icon", 0.05 < r_wb < 0.22, round(r_wb, 4))
+check("Codex 徽标是白色线框而非实心填充", 0.10 < r_cx < 0.38, round(r_cx, 4))
+check("WorkBuddy 徽标是白色线框而非原生 icon", 0.10 < r_wb < 0.38, round(r_wb, 4))
+check("去掉底板后线框确实放大（白色占比 > 0.20）", r_cx > 0.20 and r_wb > 0.20,
+      (round(r_cx, 4), round(r_wb, 4)))
 check("两枚徽标都不含品牌彩色块", colored_samples(chip) == 0 and colored_samples(wb_chip) == 0,
       (colored_samples(chip), colored_samples(wb_chip)))
 
@@ -276,6 +283,25 @@ check("未点亮黄灯仍是不透明饱和黄", a == 255 and r > 150 and g > 10
 r, g, b, a = lamp_px(744, 347)
 check("点亮绿灯是状态绿且更亮", a == 255 and g > 180 and g > r and g > b, (r, g, b, a))
 check("三灯不再有 alpha 52 的暗块", "setAlpha(52)" not in gen_src)
+
+print("9) 成品母版：徽标够大、且没有额外底色")
+with Image.open(png) as im:
+    rgba = im.convert("RGBA")
+    lefts, rights = [], []
+    for yy in range(560, 920, 2):
+        for xx in range(0, 1024, 2):
+            r0, g0, b0, a0 = rgba.getpixel((xx, yy))
+            if a0 > 120 and min(r0, g0, b0) > 185:
+                (lefts if xx < 512 else rights).append(xx)
+    lw = max(lefts) - min(lefts) if lefts else 0
+    rw = max(rights) - min(rights) if rights else 0
+    gap = (min(rights) - max(lefts)) if lefts and rights else 0
+    bg = rgba.getpixel((143, 579))
+check("左徽标线框宽度 >= 240px（原来只有约 126px）", lw >= 240, lw)
+check("右徽标线框宽度 >= 240px", rw >= 240, rw)
+check("两枚徽标之间留有净距", gap >= 60, gap)
+check("成品徽标区是主底色、没有深灰方块",
+      max(abs(bg[0] - 15), abs(bg[1] - 18), abs(bg[2] - 23)) < 14 and bg[3] > 200, bg)
 
 print(f"\n结果: {ok} 通过 / {bad} 失败")
 sys.exit(1 if bad else 0)

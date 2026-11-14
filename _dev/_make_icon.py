@@ -5,8 +5,9 @@
     .venv\\Scripts\\python.exe _dev\\_make_icon.py preview   # 出 A/B/C 对比图 + 选定方案展示图
     .venv\\Scripts\\python.exe _dev\\_make_icon.py build A   # 出 png + ico（A 可换 B/C）
 
-设计约束：16~32px 下两个第三方 logo 必然糊，所以主形必须是红绿灯，
-品牌标记退化成底部两枚徽章 —— 小尺寸靠"三灯 + 两个点"传达信息。
+设计约束：红绿灯始终是主形；两枚第三方品牌标记只保留白色线框，
+直接落在图标的深色主底上（不额外加圆角底板），并给足尺寸，
+让 48px 以上能看清是两个 AI 接入方，而不只是两个小点。
 Codex 侧必须是 assets/codex-knot.svg 的白色六瓣结，画法错了 _test_icon.py 会拦住。
 """
 from __future__ import annotations
@@ -51,11 +52,15 @@ LAMP_RED = QColor(theme.STATE_HEX["failed"])
 LAMP_AMBER = QColor(theme.STATE_HEX["waiting"])
 LAMP_GREEN = QColor(theme.STATE_HEX["done"])
 
-# 两枚徽标统一底：只画白色线框，不再贴原生彩色 icon。
-CHIP_BG = QColor("#373737")
+# 两枚品牌线框：只画白色线稿，不再贴原生彩色 icon，也不再各自垫一块底板。
+# BRAND_* 是出货方案 A 的几何，_test_icon.py 会按这些数字核对放大效果。
 OUTLINE_W = QColor("#FFFFFF")
 OUTLINE_K = 25          # 512 画布上的形态学核，约 12px 线宽
 CX_STROKE_W = 0.65      # SVG viewBox 24 单位下的描边宽度
+BRAND_PAD = 0.04        # 线框离给定 rect 的呼吸位，只留一点点，不形成"底"
+BRAND_W = 320.0         # 徽标边长（原来 180，且还要再扣 15% 内边距）
+BRAND_GAP = 104.0       # 两枚之间的净距
+BRAND_Y = 576.0         # 灯箱下沿 507，留 69px 呼吸；下沿 896 距画布底 128
 
 
 def _wb_outline() -> QPixmap:
@@ -84,6 +89,15 @@ def _outline_pixmap(mask: Image.Image, k: int) -> QPixmap:
     dil = m.filter(ImageFilter.MaxFilter(k))
     ero = m.filter(ImageFilter.MinFilter(k))
     edge = ImageChops.lighter(ImageChops.subtract(dil, m), ImageChops.subtract(m, ero))
+    # 原图里白色猫形只占 424×412 / 512，直接画会比 Codex 结形小一圈。
+    # 按 alpha 包围盒裁紧再等比放回画布，两枚线框的视觉尺寸才一致。
+    box = edge.getbbox()
+    if box:
+        tight = edge.crop(box)
+        k = min(500 / tight.width, 500 / tight.height)
+        tight = tight.resize((round(tight.width * k), round(tight.height * k)), Image.LANCZOS)
+        edge = Image.new("L", (512, 512), 0)
+        edge.paste(tight, ((512 - tight.width) // 2, (512 - tight.height) // 2))
     rgba = Image.new("RGBA", (512, 512), (255, 255, 255, 0))
     rgba.putalpha(edge.point(lambda v: min(255, int(v * 1.3))))
     buf = io.BytesIO()
@@ -195,29 +209,26 @@ def lamp(p: QPainter, cx: float, cy: float, r: float, color: QColor, lit: bool) 
     p.drawEllipse(QPointF(cx, cy), r * 1.06, r * 1.06)
 
 
-def chip_frame(p: QPainter, rect: QRectF) -> QRectF:
-    """两枚徽标共用同一块深灰底，只承载白色线框。"""
-    r = rect.width() * 0.24
-    rounded(p, rect, r, CHIP_BG)
-    p.setPen(QPen(QColor(255, 255, 255, 34), 3))
-    p.setBrush(Qt.NoBrush)
-    p.drawRoundedRect(rect, r, r)
-    pad = rect.width() * 0.15
-    return rect.adjusted(pad, pad, -pad, -pad)
+def _brand_inner(rect: QRectF) -> QRectF:
+    """线框直接落在图标主底上：只留 4% 呼吸位，不画任何底板或边框。
+
+    以前这里会填一块 #373737 圆角方块再画白线，用户明确要求去掉这层"额外底色"。
+    去掉后白色线框与 BG(#0F1217) 的对比反而更干净，小尺寸也不会变成两个灰点。
+    """
+    d = rect.width() * BRAND_PAD
+    return rect.adjusted(d, d, -d, -d)
 
 
 def wb_chip(p: QPainter, rect: QRectF) -> None:
-    """WorkBuddy：只留白色线框，不贴绿色原生 icon。"""
-    inner = chip_frame(p, rect)
+    """WorkBuddy：只留白色线框，不贴绿色原生 icon、不垫底板。"""
     pm = _wb_outline()
-    p.drawPixmap(inner, pm, QRectF(0, 0, pm.width(), pm.height()))
+    p.drawPixmap(_brand_inner(rect), pm, QRectF(0, 0, pm.width(), pm.height()))
 
 
 def codex_chip(p: QPainter, rect: QRectF) -> None:
     """Codex：现行六瓣结的白色描边线稿（同一矢量，fill 改成 none）。"""
-    inner = chip_frame(p, rect)
     p.save()
-    _cx_renderer(stroke=True).render(p, inner)
+    _cx_renderer(stroke=True).render(p, _brand_inner(rect))
     p.restore()
 
 
@@ -255,12 +266,11 @@ def variant_a(p: QPainter) -> None:
     p.setPen(QPen(HOUSING_EDGE, 5))
     p.drawRoundedRect(housing, 160, 160)
 
-    w = 180
-    y = 657
-    gap = 56
-    left = (S - (w * 2 + gap)) / 2
-    wb_chip(p, QRectF(left, y, w, w))
-    codex_chip(p, QRectF(left + w + gap, y, w, w))
+    # 两枚品牌线框：从原来的 180px 徽章（内框仅 126px）放大到 320px，
+    # 并去掉各自的深灰底板，直接贴在 BG 上。三灯仍是最大的单一元素。
+    left = (S - (BRAND_W * 2 + BRAND_GAP)) / 2
+    wb_chip(p, QRectF(left, BRAND_Y, BRAND_W, BRAND_W))
+    codex_chip(p, QRectF(left + BRAND_W + BRAND_GAP, BRAND_Y, BRAND_W, BRAND_W))
 
 
 def variant_b(p: QPainter) -> None:

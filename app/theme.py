@@ -55,6 +55,11 @@ _SPECS = {
         "menu_sep": ("#242A33", 255),
         "tray_rim": ("#0F1217", 210),
         "chip_bg": ("#373737", 255),
+        # 硬件指标：比主文字低一档，"相对弱化"而不是看不清。
+        # 告警色（>= warn/hot）仍由 _level_color 单独接管，不受这里影响。
+        "metric_value": ("#A9B4C6", 255),
+        "metric_label": ("#646E7E", 255),
+        "metric_bar": ("#35507A", 255),
         # 散热控制面板：按钮三态要单独给，浅色主题下深绿按钮会很突兀
         "panel_btn": ("#1E2530", 255),
         "panel_btn_hover": ("#27303D", 255),
@@ -87,6 +92,9 @@ _SPECS = {
         "menu_sep": ("#E2E7EE", 255),
         "tray_rim": ("#FFFFFF", 210),
         "chip_bg": ("#2A303B", 255),
+        "metric_value": ("#4A5768", 255),
+        "metric_label": ("#7C8899", 255),
+        "metric_bar": ("#A8BEDC", 255),
         "panel_btn": ("#F1F4F9", 255),
         "panel_btn_hover": ("#E3EAF5", 255),
         "panel_btn_edge_hover": ("#AEBBD0", 255),

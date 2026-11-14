@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""离屏渲染多任务布局：三种版式 × 1/2/3/5 个任务，出 PNG 供肉眼校验。"""
+"""离屏渲染多任务布局：浅/深主题 × 三种版式 × 1/2/3/5 个任务，出 PNG 供肉眼校验。"""
 import os, sys, tempfile, time
 from pathlib import Path
 
@@ -56,11 +56,15 @@ def shot(name):
     print(f"{out.name:34s} {pm.width()}x{pm.height()}")
 
 
-for style in ("standard", "bar", "stack"):
-    for n, rows in SETS.items():
-        w.set_style(style)
-        w.rows = list(rows)
-        w._row_keys = [M._row_key(s) for s in rows]
-        w.status = st.compose(w.rows, st.Status())
-        w._apply_size()
-        shot(f"_multi_{style}_{n}.png")
+# 浅/深各出一套：执行中任务的高亮与弱化后的指标色都要在两种底色上核对，
+# 只测系统当前档位会漏掉另一半回归。
+for theme_id, suffix in (("light", ""), ("dark", "_dark")):
+    w._apply_theme(theme_id, save=False)
+    for style in ("standard", "bar", "stack"):
+        for n, rows in SETS.items():
+            w.set_style(style)
+            w.rows = list(rows)
+            w._row_keys = [M._row_key(s) for s in rows]
+            w.status = st.compose(w.rows, st.Status())
+            w._apply_size()
+            shot(f"_multi_{style}_{n}{suffix}.png")

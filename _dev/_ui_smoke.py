@@ -295,6 +295,50 @@ if vm is not None:
         for name in ("CPU", "内存", "温度", "网络"):
             check(f"含 {name} 开关", name in subs, subs)
 
+print("14) 视觉层级：执行中任务突出、多任务灯放大、指标弱化")
+from PySide6.QtGui import QImage, QPainter  # noqa: E402
+
+
+def draw_task_line(state):
+    """只画一行到透明画布：排除卡片底色与指标区干扰，像素结果可判定。"""
+    q = QImage(400, 40, QImage.Format_ARGB32_Premultiplied)
+    q.fill(Qt.transparent)
+    painter = QPainter(q)
+    painter.setRenderHint(QPainter.Antialiasing, True)
+    it = st.Slot("workbuddy", "focus", state, "对话甲", "指令甲",
+                 time.time() - 60, 999, time.time(), "工作甲")
+    w._task_line(painter, 20.0, 5.0, 360.0, it, 9, 40.0, lamp=True)
+    painter.end()
+    return q
+
+
+run_q = draw_task_line(st.RUNNING)
+wait_q = draw_task_line(st.WAITING)
+check("执行中任务有整行高亮", run_q.pixelColor(200, 25).alpha() > 0,
+      run_q.pixelColor(200, 25).alpha())
+check("非执行中任务没有行高亮", wait_q.pixelColor(200, 25).alpha() == 0,
+      wait_q.pixelColor(200, 25).alpha())
+check("执行中任务有左侧强调条", run_q.pixelColor(14, 10).alpha() > 150,
+      run_q.pixelColor(14, 10).alpha())
+
+
+def core_width(q, cy=12):
+    """灯芯水平直径：光晕 alpha < 100、强调环 < 200，只数不透明的芯。"""
+    xs = [xx for xx in range(10, 60) if q.pixelColor(xx, cy).alpha() > 200]
+    return (max(xs) - min(xs) + 1) if xs else 0
+
+
+check("执行中状态灯直径 >= 13px（旧色点只有 6px）", core_width(run_q) >= 13,
+      core_width(run_q))
+check("非执行中状态灯同样够大", core_width(wait_q) >= 12, core_width(wait_q))
+
+ui_src = (Path(__file__).parent.parent / "app" / "main.py").read_text(encoding="utf-8")
+check("指标数值降为 9.5pt 常规字重", "_f(9.5, QFont.Normal, FONT_MONO)" in ui_src)
+check("指标不再用 10.5pt 粗体", "_f(10.5, QFont.DemiBold, FONT_MONO)" not in ui_src)
+check("指标走主题里的弱化色", "PAL.metric_value" in ui_src and "PAL.metric_label" in ui_src)
+check("告警色不被弱化吞掉", "vcol if alert else PAL.metric_value" in ui_src)
+check("行高亮跟着版式行高走", "row_h - 1" in ui_src and "row_h=22.0" in ui_src)
+
 print(f"\n结果: {ok} 通过 / {fail} 失败")
 st.write_state("idle")
 sys.exit(0 if fail == 0 else 1)
