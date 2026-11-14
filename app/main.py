@@ -269,6 +269,12 @@ class SignalLight(QWidget):
         self._cool.start(500)
         self._poll_cooling()
 
+        # 自愈开机自启：安全软件可能删了 Run 键，这里补写回去
+        self._heal_autostart()
+        self._heal_timer = QTimer(self)
+        self._heal_timer.timeout.connect(self._heal_autostart)
+        self._heal_timer.start(30_000)  # 30s 周期补写，盖过安全软件的瞬时清理
+
         # 启动对账放后台：万一上次是崩溃退出，这里要拉起提权进程还原电源，
         # 而 UAC 对话框会阻塞调用线程，不能卡在首屏上。
         threading.Thread(target=self.cooling.reconcile, name="cool-reconcile", daemon=True).start()
@@ -1638,7 +1644,11 @@ class SignalLight(QWidget):
         m.addSeparator()
         a_boot = QAction("开机自启", m)
         a_boot.setCheckable(True)
+        # blockSignals：setChecked 会发射 toggled，若不阻断则触发
+        # _set_autostart 把注册表写/删一遍——启动时可能反向清掉自启项。
+        a_boot.blockSignals(True)
         a_boot.setChecked(self._autostart_enabled())
+        a_boot.blockSignals(False)
         # toggled 而非 triggered：triggered 有 () / (bool) 两个重载，
         # lambda 单参数在 PySide6 可能匹配到无参版本导致静默失效。
         a_boot.toggled.connect(self._set_autostart)
@@ -1846,10 +1856,14 @@ class SignalLight(QWidget):
         return winreg, r"Software\Microsoft\Windows\CurrentVersion\Run"
 
     def _autostart_enabled(self) -> bool:
+        # 优先看 settings 里的用户意图：注册表可能被安全软件瞬时删掉，
+        # 菜单勾选态应该反映"用户开没开过"，而不是注册表瞬时状态。
+        if "autostart" in self.settings:
+            return bool(self.settings["autostart"])
         try:
             winreg, path = self._autostart_key()
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path) as k:
-                winreg.QueryValueEx(k, "AISignalLight")
+                winreg.QueryValueEx(k, "SignalLightWidget")
             return True
         except Exception:
             return False
@@ -1858,27 +1872,64 @@ class SignalLight(QWidget):
         try:
             winreg, path = self._autostart_key()
             if on:
-                if getattr(sys, "frozen", False):
-                    # 打包后 sys.executable 就是 exe 本身，
-                    # __file__ 指向临时解压目录，绝不能写进自启命令
-                    cmd = f'"{sys.executable}"'
-                else:
-                    pyw = Path(sys.executable).with_name("pythonw.exe")
-                    exe = pyw if pyw.exists() else Path(sys.executable)
-                    cmd = f'"{exe}" "{Path(__file__).resolve()}"'
-                # CreateKeyEx 确保 Run 键存在，返回句柄直接写值；
-                # PyHKEY 只有 Close()/__exit__，没有小写 close()
-                with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_SET_VALUE) as k:
-                    winreg.SetValueEx(k, "AISignalLight", 0, winreg.REG_SZ, cmd)
+                self._write_autostart_entry()
             else:
                 try:
                     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_SET_VALUE) as k:
-                        winreg.DeleteValue(k, "AISignalLight")
+                        winreg.DeleteValue(k, "SignalLightWidget")
                 except FileNotFoundError:
                     pass
+            # 持久化用户意图：安全软件可能删 Run 键，
+            # 下次启动时 _heal_autostart 据此自动修复
+            self.settings["autostart"] = on
+            st.save_settings(self.settings)
             self._notify("已开机自启" if on else "已取消开机自启", "AI 工作信号灯")
         except Exception as e:  # noqa: BLE001
             self._notify(f"设置失败：{e}", "AI 工作信号灯")
+
+    def _write_autostart_entry(self) -> None:
+        winreg, path = self._autostart_key()
+        if getattr(sys, "frozen", False):
+            # 打包后 sys.executable 就是 exe 本身，
+            # __file__ 指向临时解压目录，绝不能写进自启命令
+            cmd = f'"{sys.executable}"'
+        else:
+            pyw = Path(sys.executable).with_name("pythonw.exe")
+            exe = pyw if pyw.exists() else Path(sys.executable)
+            cmd = f'"{exe}" "{Path(__file__).resolve()}"'
+        # CreateKeyEx 确保 Run 键存在，返回句柄直接写值；
+        # PyHKEY 只有 Close()/__exit__，没有小写 close()
+        with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_SET_VALUE) as k:
+            winreg.SetValueEx(k, "SignalLightWidget", 0, winreg.REG_SZ, cmd)
+
+    def _heal_autostart(self) -> None:
+        """自愈：用户开过自启但注册表被安全软件删了 → 自动重写。
+
+        安全软件会精确匹配删除 Run 键的 "AISignalLight" 条目（无论 exe 是否在跑），
+        改名为 "SignalLightWidget" 后存活。这里同时清理旧名残留。
+        """
+        if not self.settings.get("autostart"):
+            return
+        # 顺手清理旧名残留
+        try:
+            winreg, path = self._autostart_key()
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0, winreg.KEY_SET_VALUE) as k:
+                winreg.DeleteValue(k, "AISignalLight")
+        except Exception:
+            pass
+        # 先看注册表：条目还在就不用写
+        try:
+            winreg, path = self._autostart_key()
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path) as k:
+                winreg.QueryValueEx(k, "SignalLightWidget")
+            return
+        except Exception:
+            pass
+        # 条目被删了，补写
+        try:
+            self._write_autostart_entry()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _single_instance() -> bool:
@@ -1921,6 +1972,14 @@ def main() -> int:
             cooling_mod.request_stop()
         w.thermal.stop()
         w.metrics.close()
+        # 退出时无条件强制补写自启项：安全软件只在 app 运行期间删 Run 键，
+        # 进程消失后条目存活到下次开机——这里是最佳补写时机。
+        # 不走 _heal_autostart（它会查注册表跳过写入），必须确保写进去。
+        if w.settings.get("autostart"):
+            try:
+                w._write_autostart_entry()
+            except Exception:  # noqa: BLE001
+                pass
 
     app.aboutToQuit.connect(_shutdown)
     return app.exec()

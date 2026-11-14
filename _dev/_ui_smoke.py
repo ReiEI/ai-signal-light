@@ -343,6 +343,7 @@ check("行高亮跟着版式行高走", "row_h - 1" in ui_src and "row_h=22.0" i
 check("注册表键不用小写 .close()", ".close()" not in ui_src.split("def _set_autostart")[1].split("def _single_instance")[0])
 check("CreateKeyEx 用 with 管理句柄", "with winreg.CreateKeyEx" in ui_src)
 check("开机自启用 toggled 信号（非 triggered）", "a_boot.toggled.connect" in ui_src)
+check("setChecked 用 blockSignals 防反向触发", "a_boot.blockSignals(True)" in ui_src)
 
 print(f"\n结果: {ok} 通过 / {fail} 失败")
 st.write_state("idle")
