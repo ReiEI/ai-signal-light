@@ -89,6 +89,18 @@ Windows 桌面常驻小挂件。无边框、始终置顶、可拖拽，用一盏
 
 开关结果写进 `settings.json`，重启后保持。总开关和单列是两套记忆：把硬件区块整个关掉再打开，之前单独关掉的那几列依然是关的。
 
+## 浅色 / 深色主题：跟随 Windows
+
+右键 → **主题**，三档：**跟随系统**（默认）/ 浅色 / 深色。对应 `settings.json` 的 `theme: auto | light | dark`；手改成非法值会回落到 `auto`。
+
+跟随系统读注册表 `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\AppsUseLightTheme`（也就是 Windows 的「应用模式」）。两条触发路径：Qt 的 `colorSchemeChanged` 信号即时切换，加上 `_tick` 每 1 秒轮询注册表兜底 —— 部分 Windows 版本和高对比度场景下 Qt 不发信号，只靠信号会漏。所以在系统设置里切深浅色，挂件不用重启就跟着变。
+
+跟着换的不只是卡片底色：三级文字灰度、分隔线、进度条轨道、散热告警条、右键菜单、散热面板的按钮/下拉框、托盘状态圆点的描边，全部走 `app/theme.py` 同一份调色板。面板 QSS 会在切换时重刷，不会留下一块黑面板。
+
+浅色主题下状态灯换成加深一档的变体（运行中 `#38BDF8` → `#0284C7`，完成 `#22C55E` → `#15803D`），否则天蓝和亮绿在白卡片上对比不足。自检用 WCAG 对比度守住这条线：主文字 ≥ 4.5、次文字 ≥ 3.0、状态灯 ≥ 2.2。
+
+> **exe 图标不跟着主题换。** 它是文件资源图标，Windows 不会按主题切换；而且白色线框徽标必须落在深底上才看得见。所以 `signallight.ico` 固定深色底，只有窗口内容、菜单、面板和托盘圆点联动。
+
 ## 五种状态
 
 | 状态 | 灯色 | 表现 | 含义 |
@@ -378,11 +390,17 @@ dist\fan_agent.exe --mode restore                :: 只还原电源设置
 
 <img src="assets/signallight.png" width="112" alt="AI 工作信号灯图标">
 
-主形是横排红黄绿三灯，绿灯点亮（当前有任务在跑）；下方两枚徽标分别是 WorkBuddy 官方绿色图块和 Codex 现行的**白色六瓣交织结**（深灰底），表示两个自动接入来源。
+主形是横排红黄绿三灯，绿灯点亮；下方两枚徽标是**白色线框**，不再贴原生彩色 icon。
 
-> 早期版本把 Codex 画成了"蓝紫渐变团块 + `>_`"，那是按过时的网络资料猜的，与客户端现行标记不符，已按用户提供的截图更正。结形用矢量重画而不放大 48px 截图：候选矢量与参考截图做二值掩膜比对，IoU 0.79 的那份胜出（另两份 0.65 / 0.49 且带绿色底板）。`_dev/_test_icon.py` 会持续核对出货图标与参考掩膜的 IoU，换错 logo 会直接测挂。
+**三盏灯取软件状态灯的真实颜色**（`app/theme.py` 的 `STATE_HEX`，也是卡片上状态灯的权威色）：红 = `failed #EF4444`、黄 = `waiting #F59E0B`、绿 = `done #22C55E`。以前图标自己编了一套 `#FF5C5C / #FFB020 / #2BD97C`，和界面根本不是同一套色；现在生成器直接 import `theme`，自检逐项比对 hex。
 
-**为什么把品牌缩小**：图标主要在 16–32px 出现（任务栏、托盘、资源管理器）。两个第三方 logo 在这个尺寸必然糊成一团，所以让三灯承担识别、品牌退化成两枚徽章；结形的镂空要到 128px 以上才看得清。这是取舍，不是画质问题 —— 真要每个尺寸都清晰，就得放弃「图标里塞两个 logo」这个要求。
+**明显度**做了两处修正：未点亮的灯以前压到 alpha 52，几乎看不见，整张图只剩一个绿点；现在三盏都是不透明饱和实色（只压 18% 明度），亮的那盏额外加光晕和高光。灯箱同时压成近黑、外沿提亮，让彩色灯珠跳出来。
+
+**两枚徽标只留白色线稿**：WorkBuddy 从 600px 官方原图里按亮度抽出白色图形（绿色块亮度约 158、白色约 255），再做膨胀减腐蚀取内外轮廓；Codex 把同一份结形矢量的 `fill` 改成 `none` + 白色描边。两枚共用深灰圆角底，没有绿色方块、没有实心填充。`_dev/_test_icon.py` 会核对白色面积占比、无彩色像素、以及结形与参考图的 IoU。
+
+> 早期版本把 Codex 画成了"蓝紫渐变团块 + `>_`"，是按过时的网络资料猜的，已按用户提供的截图更正。结形矢量的选型依据是二值掩膜比对：IoU 0.79 的那份胜出（另两份 0.65 / 0.49 且带绿色底板）。
+
+**为什么把品牌缩小**：图标主要在 16–32px 出现（任务栏、托盘、资源管理器）。两个第三方 logo 在这个尺寸必然糊成一团，所以让三灯承担识别、品牌退化成两枚线框；线稿的镂空要到 128px 以上才看得清。这是取舍，不是画质问题 —— 真要每个尺寸都清晰，就得放弃「图标里塞两个 logo」这个要求。
 
 | 文件 | 用途 |
 |---|---|
@@ -394,7 +412,7 @@ dist\fan_agent.exe --mode restore                :: 只还原电源设置
 
 托盘里那颗随状态变色的圆点没有换：它是状态提示位，不是品牌位。
 
-重新生成（需在项目 venv 里装 `pillow`，只用于写 ICO；`QtSvg` 随 PySide6 自带。程序运行时两者都不依赖）：
+重新生成（需在项目 venv 里装 `pillow`，用于提线框和写 ICO；`QtSvg` 随 PySide6 自带。程序运行时都不依赖）：
 
 ```bat
 .venv\Scripts\python.exe _dev\_make_icon.py preview   :: 出 A/B/C 三方案 × 六尺寸对比图
@@ -415,6 +433,7 @@ AI工作信号灯/
 │  └─ fan_agent.exe     散热执行体（单文件，可提权运行）
 ├─ app/
 │  ├─ main.py           窗口、三套版式、散热条、托盘、交互
+│  ├─ theme.py          浅/深调色板 + 状态灯权威色 + Windows 主题检测 + 菜单/面板 QSS
 │  ├─ state.py          状态模型 / 单文件 + 多槽位 / TTL 降级 / 聚合 / 设置
 │  ├─ codex.py          Codex 会话监听（增量读 rollout，写槽位）
 │  ├─ metrics.py        CPU、内存、网速、温度采集 + PDH 性能计数器
@@ -481,10 +500,13 @@ AI工作信号灯/
 .venv\Scripts\python.exe _dev\_ui_smoke.py            :: 82 项，菜单/版式/尺寸/托盘/跨屏/多任务/显示开关
 .venv\Scripts\python.exe _dev\_test_cooling.py        :: 55 项，散热解析/会话/恢复/执行体/打包路径
 .venv\Scripts\python.exe _dev\_test_cool_ui.py        :: 27 项，散热菜单/散热条/停止热区/面板
-.venv\Scripts\python.exe _dev\_test_icon.py          :: 41 项，图标资产/接线/exe 内嵌帧/Codex 结形比对
+.venv\Scripts\python.exe _dev\_test_icon.py          :: 51 项，图标资产/线框/状态灯实色/exe 内嵌帧
+.venv\Scripts\python.exe _dev\_test_theme.py         :: 56 项，双调色板/对比度/系统联动/面板与托盘换色
 ```
 
-合计 370 项。其中 `_test_cooling.py` 真的起子进程跑执行体（到期、`stop.flag`、单实例互斥），`_test_cool_ui.py` 真的构造鼠标事件点"停止"热区，`_ui_smoke.py` 真的写槽位文件再走一遍 `_poll_state` —— 这几类只有跨进程/跨事件循环才测得到。`_test_icon.py` 会渲染真正出货的 `codex_chip` 并与参考掩膜算 IoU，还会逐帧比对三个 exe 的 `RT_ICON`；只改代码不重打包，它会直接报"内嵌帧不匹配"。
+合计 436 项。其中 `_test_cooling.py` 真的起子进程跑执行体（到期、`stop.flag`、单实例互斥），`_test_cool_ui.py` 真的构造鼠标事件点"停止"热区，`_ui_smoke.py` 真的写槽位文件再走一遍 `_poll_state` —— 这几类只有跨进程/跨事件循环才测得到。
+
+`_test_icon.py` 会渲染真正出货的 `codex_chip` / `wb_chip`，核对线框白色占比、无彩色块、三灯 hex 等于 `theme.STATE_HEX`，还会逐帧比对三个 exe 的 `RT_ICON`；只改代码不重打包，它会直接报"内嵌帧不匹配"。`_test_theme.py` 会模拟注册表返回浅/深，验证卡片、菜单、托盘、散热面板是否一起换色，并用 WCAG 对比度挡住"浅底浅字"。
 
 渲染检查：
 
@@ -492,6 +514,7 @@ AI工作信号灯/
 .venv\Scripts\python.exe _dev\_render_cool.py    :: 三版式 × 有/无会话，出 PNG
 .venv\Scripts\python.exe _dev\_render_multi.py   :: 三版式 × 1/2/3/5 个任务，出 PNG
 .venv\Scripts\python.exe _dev\_render_show.py    :: 三版式 × 各种显示元素组合，出 PNG
+.venv\Scripts\python.exe _dev\_render_theme.py   :: 浅/深 × 三版式 + 散热条 + 散热面板，出 PNG
 ```
 
 ## 已知限制
@@ -508,6 +531,8 @@ AI工作信号灯/
 - **温度数值的语义随来源变化**：ADL/nvidia-smi 给的是 GPU（APU 上实际是 SoC），LHM 给的是 CPU 封装。不要跨机器比较绝对值。
 - 网速为全机流量，不是单个进程流量。
 - 开机自启写 `HKCU\...\Run`，路径绑定当前位置，移动文件夹后需重新勾选。
+- **exe 图标不随主题切换**：文件资源图标由 Windows 决定，且白色线框徽标需要深底。浅色系统下 exe 图标仍是深色底，只有窗口内容/菜单/面板/托盘圆点跟随主题。
+- **主题跟随读的是「应用模式」**（`AppsUseLightTheme`），不是「Windows 模式」（`SystemUsesLightTheme`）。两者在 Windows 里可以分别设置；任务栏深浅由后者决定，挂件按前者走。
 - exe 是 PyInstaller onefile，每次启动要先解压到临时目录，首屏有 1~2 秒延迟。散热执行体同理，所以第一次点「风扇全速」会有一秒左右的延迟。
 - 鼠标手感、拖拽跟手程度这类主观项仍需人工确认。
 

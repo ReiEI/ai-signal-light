@@ -32,17 +32,10 @@ from PySide6.QtWidgets import (
 import cooling as cool
 import powerplan
 import state
+import theme
 
-BG = "#12161C"
-CARD = "#171C24"
-LINE = "#242A33"
-TXT = "#E8ECF2"
-DIM = "#8A94A6"
-FAINT = "#5D6675"
-AMBER = "#F59E0B"
-GREEN = "#22C55E"
-BLUE = "#38BDF8"
-RED = "#EF4444"
+# 面板与卡片共用一套调色板；主题切换时由 apply_theme() 重刷 QSS。
+PAL = theme.PAL
 
 FONT = "Microsoft YaHei UI"
 MONO = "Consolas"
@@ -97,12 +90,12 @@ class Sparkline(QWidget):
         p.setRenderHint(QPainter.Antialiasing, True)
         r = QRectF(0, 0, self.width(), self.height())
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(CARD))
+        p.setBrush(PAL.track)
         p.drawRoundedRect(r, 8, 8)
 
         vals = [v for v in self._vals if v is not None]
         if len(vals) < 2:
-            p.setPen(QColor(FAINT))
+            p.setPen(PAL.txt_faint)
             p.setFont(_font(7.5))
             p.drawText(r, Qt.AlignCenter, "采集中…")
             return
@@ -136,23 +129,23 @@ class Sparkline(QWidget):
         area.lineTo(pts[-1].x(), pad + h)
         area.lineTo(pts[0].x(), pad + h)
         area.closeSubpath()
-        grad = QColor(AMBER)
+        grad = PAL.amber
         grad.setAlpha(46)
         p.setBrush(grad)
         p.setPen(Qt.NoPen)
         p.drawPath(area)
 
         p.setBrush(Qt.NoBrush)
-        p.setPen(QPen(QColor(AMBER), 1.6, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        p.setPen(QPen(PAL.amber, 1.6, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         p.drawPath(path)
 
         last = pts[-1]
         p.setPen(Qt.NoPen)
-        p.setBrush(QColor(AMBER))
+        p.setBrush(PAL.amber)
         p.drawEllipse(QRectF(last.x() - 2.4, last.y() - 2.4, 4.8, 4.8))
 
         p.setFont(_font(7, QFont.Normal, MONO))
-        p.setPen(QColor(FAINT))
+        p.setPen(PAL.txt_faint)
         p.drawText(QRectF(pad, 2, 40, 12), Qt.AlignLeft | Qt.AlignVCenter, f"{hi:.0f}°")
         p.drawText(QRectF(pad, r.height() - 14, 40, 12), Qt.AlignLeft | Qt.AlignVCenter, f"{lo:.0f}°")
 
@@ -196,30 +189,7 @@ class CoolingPanel(QDialog):
         self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         self.setMinimumWidth(468)
         self.resize(492, 528)
-        self.setStyleSheet(f"""
-            QDialog {{ background:{BG}; }}
-            QLabel {{ color:{TXT}; font-family:'{FONT}'; font-size:12px; }}
-            QFrame#block {{ background:{CARD}; border:1px solid {LINE}; border-radius:10px; }}
-            QLabel#k {{ color:{FAINT}; font-size:11px; }}
-            QLabel#v {{ color:{TXT}; font-size:12px; }}
-            QLabel#big {{ color:{TXT}; font-family:'{MONO}'; font-size:19px; font-weight:600; }}
-            QLabel#hint {{ color:{FAINT}; font-size:11px; }}
-            QPushButton {{
-                background:#1E2530; color:{TXT}; border:1px solid {LINE};
-                border-radius:7px; padding:7px 12px; font-family:'{FONT}'; font-size:12px;
-            }}
-            QPushButton:hover:enabled {{ background:#27303D; border-color:#3A4556; }}
-            QPushButton:disabled {{ color:{FAINT}; background:#171C24; }}
-            QPushButton#primary {{ background:#1B3A2C; border-color:#2C5B45; color:#8FE3B4; }}
-            QPushButton#primary:hover:enabled {{ background:#204735; }}
-            QPushButton#danger {{ background:#3A2318; border-color:#5B3A2C; color:#F0B48F; }}
-            QPushButton#danger:hover:enabled {{ background:#472B1D; }}
-            QComboBox, QSpinBox {{
-                background:#1E2530; color:{TXT}; border:1px solid {LINE};
-                border-radius:6px; padding:5px 8px; font-family:'{FONT}'; font-size:12px;
-            }}
-            QComboBox QAbstractItemView {{ background:#1E2530; color:{TXT}; selection-background-color:#2B3546; }}
-        """)
+        self.setStyleSheet(theme.panel_stylesheet(PAL))
 
         root = QVBoxLayout(self)
         root.setContentsMargins(16, 14, 16, 14)
@@ -359,6 +329,11 @@ class CoolingPanel(QDialog):
 
     # ---------- 生命周期 ----------
 
+    def apply_theme(self) -> None:
+        """主程序检测到系统深浅色变化后调用：QSS 不会自动跟着调色板变。"""
+        self.setStyleSheet(theme.panel_stylesheet(PAL))
+        self.update()
+
     def showEvent(self, e) -> None:  # noqa: N802
         super().showEvent(e)
         self.cooling.cap.refresh()
@@ -432,10 +407,10 @@ class CoolingPanel(QDialog):
             coolpol = p.get("cool")
             if isinstance(coolpol, dict):
                 self.lb_coolpol.setText("主动（优先风扇）" if coolpol.get("ac") == 1 else "被动（优先降频）")
-                self.lb_coolpol.setStyleSheet(f"color:{TXT}")
+                self.lb_coolpol.setStyleSheet(f"color:{theme.hex_str(PAL.txt)}")
             else:
                 self.lb_coolpol.setText("本机未暴露")
-                self.lb_coolpol.setStyleSheet(f"color:{FAINT}")
+                self.lb_coolpol.setStyleSheet(f"color:{theme.hex_str(PAL.txt_faint)}")
 
         if self._restore_msg:
             self.lb_msg.setText(self._restore_msg)

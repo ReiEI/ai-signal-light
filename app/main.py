@@ -56,6 +56,7 @@ import codex as codex_mod  # noqa: E402
 import cooling as cooling_mod  # noqa: E402
 import metrics as metrics_mod  # noqa: E402
 import state as st  # noqa: E402
+import theme as theme_mod  # noqa: E402
 from cooling_ui import CoolingPanel, fmt_dur, fmt_short  # noqa: E402
 
 # ---------------- 版式 ----------------
@@ -120,23 +121,10 @@ MARGIN = 8  # 阴影留白
 # 任务名称里工作空间与对话名的分隔符
 TASK_SEP = " - "
 
-CARD_BG = QColor(15, 18, 23, 243)
-CARD_BORDER = QColor(46, 52, 63)
-TXT = QColor(232, 236, 242)
-TXT_DIM = QColor(124, 134, 150)
-TXT_FAINT = QColor(88, 97, 112)
-DIVIDER = QColor(34, 39, 47)
-TRACK = QColor(31, 36, 44)
-BAR_BLUE = QColor(62, 123, 214)
-AMBER = QColor(245, 158, 11)
-
-STATE_COLORS = {
-    st.IDLE: QColor(92, 100, 114),
-    st.RUNNING: QColor(56, 189, 248),
-    st.DONE: QColor(34, 197, 94),
-    st.WAITING: QColor(245, 158, 11),
-    st.FAILED: QColor(239, 68, 68),
-}
+# 所有颜色集中到 app/theme.py（浅/深两套 + 状态灯权威色）。
+# PAL 是 theme_mod.PAL 的别名而不是新实例：切换主题时原地换色，
+# 任何一处绘制代码拿到的都是当前主题，不会残留旧 QColor。
+PAL = theme_mod.PAL
 
 SRC_NAMES = {
     "adl": "AMD ADL",
@@ -190,6 +178,11 @@ class SignalLight(QWidget):
     def __init__(self, demo: bool = False) -> None:
         super().__init__()
         self.settings = st.load_settings()
+        self._theme_pref = theme_mod.sanitize(self.settings.get("theme"))
+        self._theme_id = ""
+        self._theme_check_t = 0.0
+        PAL.set(theme_mod.resolve(self._theme_pref))
+        self._theme_id = PAL.name
         self.reader = st.StateReader()
         self.codex = codex_mod.CodexWatcher()
         self.metrics = metrics_mod.Metrics()
@@ -223,6 +216,14 @@ class SignalLight(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         self.setAttribute(Qt.WA_ShowWithoutActivating, True)
         self.setWindowTitle("AI 工作信号灯")
+
+        # 系统主题变化：Qt 信号负责即时通知，_tick 里的注册表轮询兜底
+        # （部分 Windows 版本 / 高对比度场景下 Qt 信号不触发）。
+        try:
+            hints = QGuiApplication.instance().styleHints()
+            hints.colorSchemeChanged.connect(self._on_system_scheme)
+        except Exception:
+            pass
 
         self._build_tray()
         self._apply_size()
@@ -347,6 +348,11 @@ class SignalLight(QWidget):
 
     def _tick(self) -> None:
         self._phase += 0.10
+        if self._theme_pref == "auto":
+            now = time.time()
+            if now - self._theme_check_t > 1.0:
+                self._theme_check_t = now
+                self._apply_theme(theme_mod.resolve("auto"), save=False)
         if self._demo:
             now = time.time()
             if now - self._demo_t0 > 3.0:
@@ -503,18 +509,18 @@ class SignalLight(QWidget):
     def _paint_card(self, p: QPainter, card: QRectF, radius: float) -> None:
         # 投影（三层近似）
         p.setPen(Qt.NoPen)
-        for i, a in enumerate((18, 26, 34)):
+        for i, a in enumerate(PAL.shadow_layers):
             g = i * 1.6
             p.setBrush(QColor(0, 0, 0, a))
             p.drawRoundedRect(card.adjusted(-g, -g * 0.5, g, g), radius + 2, radius + 2)
 
-        p.setBrush(CARD_BG)
-        p.setPen(QPen(CARD_BORDER, 1))
+        p.setBrush(PAL.card_bg)
+        p.setPen(QPen(PAL.card_border, 1))
         p.drawRoundedRect(card, radius, radius)
         p.setPen(Qt.NoPen)
 
     def _status_color(self) -> QColor:
-        c = STATE_COLORS.get(self.status.state, STATE_COLORS[st.IDLE])
+        c = PAL.state(self.status.state)
         if self.status.stale:
             c = QColor(c.red(), c.green(), c.blue(), 110)
         return c
@@ -570,7 +576,7 @@ class SignalLight(QWidget):
         dot=True 时用色点代替状态文字 —— 竖版只有 172px 内宽，
         "进行中"三个字要吃掉 20% 的宽度，不值。
         """
-        color = STATE_COLORS.get(it.state, STATE_COLORS[st.IDLE])
+        color = PAL.state(it.state)
         if dot:
             p.setPen(Qt.NoPen)
             p.setBrush(color)
@@ -578,7 +584,7 @@ class SignalLight(QWidget):
         else:
             f = _f(size, QFont.DemiBold)
             p.setFont(f)
-            p.setPen(color if it.state != st.IDLE else TXT_DIM)
+            p.setPen(color if it.state != st.IDLE else PAL.txt_dim)
             label = st.LABELS.get(it.state, it.state)
             p.drawText(QRectF(x, y, max(label_w, QFontMetrics(f).horizontalAdvance(label) + 2), 15),
                        Qt.AlignLeft | Qt.AlignVCenter, label)
@@ -589,7 +595,7 @@ class SignalLight(QWidget):
             if el:
                 tw = 44.0
                 p.setFont(_f(size - 1, QFont.Normal, FONT_MONO))
-                p.setPen(TXT_FAINT)
+                p.setPen(PAL.txt_faint)
                 p.drawText(QRectF(x + w - tw, y, tw, 15),
                            Qt.AlignRight | Qt.AlignVCenter, el)
         # +3 是标签与名称之间的呼吸位：状态词宽度正好等于 label_w 时，
@@ -601,7 +607,7 @@ class SignalLight(QWidget):
     def _more_line(self, p: QPainter, x: float, y: float, w: float,
                    more: int, size: float) -> None:
         p.setFont(_f(size))
-        p.setPen(TXT_FAINT)
+        p.setPen(PAL.txt_faint)
         p.drawText(QRectF(x, y, w, 15), Qt.AlignLeft | Qt.AlignVCenter,
                    f"另有 {more} 个任务在跑（右键 → 任务清单）")
 
@@ -610,7 +616,7 @@ class SignalLight(QWidget):
         detail = (it.detail or "").strip()
         if not detail:
             return
-        self._draw_elided(p, detail, _f(size), TXT_DIM, QRectF(x, y, w, 14))
+        self._draw_elided(p, detail, _f(size), PAL.txt_dim, QRectF(x, y, w, 14))
 
     # ---- 标准卡：400×138（开满时的尺寸，关区块会缩）----
     def _paint_standard(self, p: QPainter, card: QRectF) -> None:
@@ -636,7 +642,7 @@ class SignalLight(QWidget):
 
         f_label = _f(10, QFont.DemiBold)
         p.setFont(f_label)
-        p.setPen(color if stt.state != st.IDLE else TXT_DIM)
+        p.setPen(color if stt.state != st.IDLE else PAL.txt_dim)
         label = self._status_label()
         p.drawText(QRectF(text_x, row1_y, 92, 19), Qt.AlignLeft | Qt.AlignVCenter, label)
         lw = QFontMetrics(f_label).horizontalAdvance(label)
@@ -655,7 +661,7 @@ class SignalLight(QWidget):
             detail = f"{detail} · 另有 {stt.peers} 个" if detail else f"另有 {stt.peers} 个任务"
         elapsed_w = 62.0
         self._draw_elided(
-            p, detail, _f(8.5), TXT_DIM,
+            p, detail, _f(8.5), PAL.txt_dim,
             QRectF(text_x, row2_y, card.right() - pad - text_x - elapsed_w, 16),
         )
 
@@ -664,7 +670,7 @@ class SignalLight(QWidget):
             el = fmt_elapsed(time.time() - stt.ts)
             if el:
                 p.setFont(_f(8, QFont.Normal, FONT_MONO))
-                p.setPen(TXT_FAINT)
+                p.setPen(PAL.txt_faint)
                 p.drawText(
                     QRectF(card.right() - pad - elapsed_w, row2_y, elapsed_w, 16),
                     Qt.AlignRight | Qt.AlignVCenter, el,
@@ -684,7 +690,7 @@ class SignalLight(QWidget):
             return y
         pad = 14.0
         if divider:
-            p.setPen(QPen(DIVIDER, 1))
+            p.setPen(QPen(PAL.divider, 1))
             p.drawLine(
                 QPoint(int(card.left() + pad), int(y)),
                 QPoint(int(card.right() - pad), int(y)),
@@ -744,7 +750,7 @@ class SignalLight(QWidget):
             return
 
         pad = 14.0
-        p.setPen(QPen(DIVIDER, 1))
+        p.setPen(QPen(PAL.divider, 1))
         p.drawLine(
             QPoint(int(card.left() + pad), int(y)),
             QPoint(int(card.right() - pad), int(y)),
@@ -755,11 +761,11 @@ class SignalLight(QWidget):
         alpha = 120 + 90 * (0.5 + 0.5 * math.sin(ph * 2.2))
         cx, cy = card.left() + pad + 4.0, y + 14.0
         p.setPen(Qt.NoPen)
-        halo = QColor(AMBER)
+        halo = QColor(PAL.amber)
         halo.setAlpha(int(alpha * 0.35))
         p.setBrush(halo)
         p.drawEllipse(QRectF(cx - 5, cy - 5, 10, 10))
-        core = QColor(AMBER)
+        core = QColor(PAL.amber)
         core.setAlpha(int(alpha))
         p.setBrush(core)
         p.drawEllipse(QRectF(cx - 2.4, cy - 2.4, 4.8, 4.8))
@@ -767,7 +773,7 @@ class SignalLight(QWidget):
         tx = cx + 9
         f_label = _f(8.5, QFont.DemiBold)
         p.setFont(f_label)
-        p.setPen(AMBER)
+        p.setPen(PAL.amber)
         p.drawText(QRectF(tx, y + 5, 78, 18), Qt.AlignLeft | Qt.AlignVCenter, s.label)
         lw = QFontMetrics(f_label).horizontalAdvance(s.label)
 
@@ -776,19 +782,19 @@ class SignalLight(QWidget):
         else:
             left = f"已运行 {fmt_dur(s.elapsed())}"
         p.setFont(_f(7.5, QFont.Normal, FONT_MONO))
-        p.setPen(TXT_DIM)
+        p.setPen(PAL.txt_dim)
         p.drawText(QRectF(tx + lw + 8, y + 5, 130, 18), Qt.AlignLeft | Qt.AlignVCenter, left)
 
         # 停止热区：画出来就要能点，所以矩形存在这里给 mousePressEvent 用
         bw, bh = 44.0, 18.0
         r = QRectF(card.right() - pad - bw, y + 5, bw, bh)
         self._stop_rect = r
-        border = QColor(AMBER)
+        border = QColor(PAL.amber)
         border.setAlpha(120)
-        p.setBrush(QColor(245, 158, 11, 26))
+        p.setBrush(theme_mod.tint(PAL.amber, 26))
         p.setPen(QPen(border, 1))
         p.drawRoundedRect(r, 9, 9)
-        p.setPen(AMBER)
+        p.setPen(PAL.amber)
         p.setFont(_f(7.5, QFont.DemiBold))
         p.drawText(r, Qt.AlignCenter, "停止")
 
@@ -810,7 +816,7 @@ class SignalLight(QWidget):
         text_x = card.left() + pad + 22
         f_label = _f(9.5, QFont.DemiBold)
         p.setFont(f_label)
-        p.setPen(color if stt.state != st.IDLE else TXT_DIM)
+        p.setPen(color if stt.state != st.IDLE else PAL.txt_dim)
         label = self._status_label()
         p.drawText(QRectF(text_x, card.top() + 7, 60, 19), Qt.AlignLeft | Qt.AlignVCenter, label)
         lw = QFontMetrics(f_label).horizontalAdvance(label)
@@ -833,13 +839,13 @@ class SignalLight(QWidget):
         if stt.peers > 0:
             detail = f"{detail} · 另有 {stt.peers} 个" if detail else f"另有 {stt.peers} 个任务"
         self._draw_elided(
-            p, detail, _f(8), TXT_DIM,
+            p, detail, _f(8), PAL.txt_dim,
             QRectF(text_x, card.top() + 26,
                    card.right() - pad - text_x - mw - stop_w - 10, 16),
         )
         if micro:
             p.setFont(_f(7, QFont.Normal, FONT_MONO))
-            p.setPen(TXT_FAINT)
+            p.setPen(PAL.txt_faint)
             p.drawText(
                 QRectF(card.right() - pad - stop_w - mw - 2, card.top() + 26, mw + 2, 16),
                 Qt.AlignRight | Qt.AlignVCenter, micro,
@@ -847,12 +853,12 @@ class SignalLight(QWidget):
         if stop_w:
             r = QRectF(card.right() - pad - 13, card.top() + 27, 13, 13)
             self._stop_rect = r
-            border = QColor(AMBER)
+            border = QColor(PAL.amber)
             border.setAlpha(130)
-            p.setBrush(QColor(245, 158, 11, 30))
+            p.setBrush(theme_mod.tint(PAL.amber, 30))
             p.setPen(QPen(border, 1))
             p.drawRoundedRect(r, 3.5, 3.5)
-            p.setPen(AMBER)
+            p.setPen(PAL.amber)
             p.setFont(_f(8.5, QFont.DemiBold))
             p.drawText(r, Qt.AlignCenter, "×")
 
@@ -866,7 +872,7 @@ class SignalLight(QWidget):
         micro = self._micro_metrics()
         stop_w = 20.0 if self.cool is not None else 0.0
         self._draw_elided(
-            p, micro, _f(8, QFont.Normal, FONT_MONO), TXT_DIM,
+            p, micro, _f(8, QFont.Normal, FONT_MONO), PAL.txt_dim,
             QRectF(card.left() + pad, card.top(),
                    card.width() - pad * 2 - stop_w, card.height()),
         )
@@ -874,12 +880,12 @@ class SignalLight(QWidget):
             r = QRectF(card.right() - pad - 13,
                        card.top() + (card.height() - 13) / 2.0, 13, 13)
             self._stop_rect = r
-            border = QColor(AMBER)
+            border = QColor(PAL.amber)
             border.setAlpha(130)
-            p.setBrush(QColor(245, 158, 11, 30))
+            p.setBrush(theme_mod.tint(PAL.amber, 30))
             p.setPen(QPen(border, 1))
             p.drawRoundedRect(r, 3.5, 3.5)
-            p.setPen(AMBER)
+            p.setPen(PAL.amber)
             p.setFont(_f(8.5, QFont.DemiBold))
             p.drawText(r, Qt.AlignCenter, "×")
 
@@ -907,18 +913,18 @@ class SignalLight(QWidget):
         stop_w = 20.0 if self.cool is not None else 0.0
         if micro:
             p.setFont(_f(7, QFont.Normal, FONT_MONO))
-            p.setPen(TXT_FAINT)
+            p.setPen(PAL.txt_faint)
             p.drawText(QRectF(card.right() - pad - stop_w - mw - 2, y, mw + 2, 16),
                        Qt.AlignRight | Qt.AlignVCenter, micro)
         if stop_w:
             r = QRectF(card.right() - pad - 13, y + 1, 13, 13)
             self._stop_rect = r
-            border = QColor(AMBER)
+            border = QColor(PAL.amber)
             border.setAlpha(130)
-            p.setBrush(QColor(245, 158, 11, 30))
+            p.setBrush(theme_mod.tint(PAL.amber, 30))
             p.setPen(QPen(border, 1))
             p.drawRoundedRect(r, 3.5, 3.5)
-            p.setPen(AMBER)
+            p.setPen(PAL.amber)
             p.setFont(_f(8.5, QFont.DemiBold))
             p.drawText(r, Qt.AlignCenter, "×")
 
@@ -971,7 +977,7 @@ class SignalLight(QWidget):
 
             text_x = card.left() + pad + (0.0 if multi else 20.0)
             p.setFont(_f(10, QFont.DemiBold))
-            p.setPen(color if stt.state != st.IDLE else TXT_DIM)
+            p.setPen(color if stt.state != st.IDLE else PAL.txt_dim)
             p.drawText(
                 QRectF(text_x, card.top() + 12, card.right() - pad - text_x, 19),
                 Qt.AlignLeft | Qt.AlignVCenter, self._status_label(),
@@ -998,11 +1004,11 @@ class SignalLight(QWidget):
                     if el:
                         detail = f"{detail} · {el}" if detail else el
                 self._draw_elided(
-                    p, detail, _f(7.5), TXT_FAINT,
+                    p, detail, _f(7.5), PAL.txt_faint,
                     QRectF(card.left() + pad, card.top() + 51, inner_w, 14),
                 )
 
-            p.setPen(QPen(DIVIDER, 1))
+            p.setPen(QPen(PAL.divider, 1))
             dy = card.top() + self._stack_task_h()
             p.drawLine(
                 QPoint(int(card.left() + pad), int(dy)),
@@ -1040,7 +1046,7 @@ class SignalLight(QWidget):
         pad = 14.0
         # 四行指标最后一行的副文字（↑上行）落在上一行下沿，分隔线必须让开，
         # 否则"↑5.2K"会和"风扇全速"叠在一起 —— 这个位置是量出来的，不是估的。
-        p.setPen(QPen(DIVIDER, 1))
+        p.setPen(QPen(PAL.divider, 1))
         p.drawLine(
             QPoint(int(card.left() + pad), int(y)),
             QPoint(int(card.right() - pad), int(y)),
@@ -1049,30 +1055,30 @@ class SignalLight(QWidget):
         cx, cy = card.left() + pad + 3.0, y + 11.0
         alpha = 120 + 90 * (0.5 + 0.5 * math.sin(self._phase * 2.2))
         p.setPen(Qt.NoPen)
-        core = QColor(AMBER)
+        core = QColor(PAL.amber)
         core.setAlpha(int(alpha))
         p.setBrush(core)
         p.drawEllipse(QRectF(cx - 2.4, cy - 2.4, 4.8, 4.8))
 
         p.setFont(_f(8, QFont.DemiBold))
-        p.setPen(AMBER)
+        p.setPen(PAL.amber)
         p.drawText(QRectF(cx + 9, y + 3, 76, 16), Qt.AlignLeft | Qt.AlignVCenter, s.label)
 
         bw, bh = 40.0, 15.0
         r = QRectF(card.right() - pad - bw, y + 3, bw, bh)
         self._stop_rect = r
-        border = QColor(AMBER)
+        border = QColor(PAL.amber)
         border.setAlpha(110)
-        p.setBrush(QColor(245, 158, 11, 22))
+        p.setBrush(theme_mod.tint(PAL.amber, 22))
         p.setPen(QPen(border, 1))
         p.drawRoundedRect(r, 7.5, 7.5)
-        p.setPen(AMBER)
+        p.setPen(PAL.amber)
         p.setFont(_f(7, QFont.DemiBold))
         p.drawText(r, Qt.AlignCenter, "停止")
 
         tip = f"剩 {fmt_dur(s.remaining())}" if s.has_deadline() else f"已运行 {fmt_dur(s.elapsed())}"
         p.setFont(_f(7, QFont.Normal, FONT_MONO))
-        p.setPen(TXT_DIM)
+        p.setPen(PAL.txt_dim)
         p.drawText(
             QRectF(card.left() + pad, y + 21, card.width() - pad * 2, 12),
             Qt.AlignLeft | Qt.AlignVCenter, tip,
@@ -1083,7 +1089,7 @@ class SignalLight(QWidget):
         pct: float | None = None, sub: str = "", warn: float = 75.0, hot: float = 90.0,
     ) -> None:
         p.setFont(_f(7.5))
-        p.setPen(TXT_FAINT)
+        p.setPen(PAL.txt_faint)
         p.drawText(QRectF(x, y, w * 0.45, 12), Qt.AlignLeft | Qt.AlignVCenter, label)
 
         vcol, bcol = self._level_color(pct, warn, hot)
@@ -1097,7 +1103,7 @@ class SignalLight(QWidget):
             self._bar(p, x, y + 17, w, 3.0, pct / 100.0, bcol)
         elif sub:
             p.setFont(_f(7))
-            p.setPen(TXT_FAINT)
+            p.setPen(PAL.txt_faint)
             p.drawText(
                 QRectF(x + w * 0.55, y + 15, w * 0.45, 12),
                 Qt.AlignRight | Qt.AlignVCenter, sub,
@@ -1108,7 +1114,7 @@ class SignalLight(QWidget):
         value: str, sub: str, pct: float | None, warn: float = 75.0, hot: float = 90.0,
     ) -> None:
         p.setFont(_f(7.5))
-        p.setPen(TXT_FAINT)
+        p.setPen(PAL.txt_faint)
         p.drawText(QRectF(x, y, w, 12), Qt.AlignLeft | Qt.AlignVCenter, label)
 
         vcol, bcol = self._level_color(pct, warn, hot)
@@ -1118,24 +1124,24 @@ class SignalLight(QWidget):
 
         if sub:
             p.setFont(_f(7.5))
-            p.setPen(TXT_FAINT)
+            p.setPen(PAL.txt_faint)
             p.drawText(QRectF(x, y + 32, w, 12), Qt.AlignLeft | Qt.AlignVCenter, sub)
 
         self._bar(p, x, y + 46, w - 6, 3.0, (pct or 0.0) / 100.0, bcol)
 
     def _net_col(self, p: QPainter, x: float, y: float, w: float) -> None:
         p.setFont(_f(7.5))
-        p.setPen(TXT_FAINT)
+        p.setPen(PAL.txt_faint)
         p.drawText(QRectF(x, y, w, 12), Qt.AlignLeft | Qt.AlignVCenter, "网络")
 
         p.setFont(_f(10.5, QFont.DemiBold, FONT_MONO))
-        p.setPen(TXT)
+        p.setPen(PAL.txt)
         p.drawText(
             QRectF(x, y + 13, w, 18), Qt.AlignLeft | Qt.AlignVCenter,
             "↓" + metrics_mod.fmt_rate(self.metrics.down),
         )
         p.setFont(_f(7.5))
-        p.setPen(TXT_FAINT)
+        p.setPen(PAL.txt_faint)
         p.drawText(
             QRectF(x, y + 32, w, 12), Qt.AlignLeft | Qt.AlignVCenter,
             "↑" + metrics_mod.fmt_rate(self.metrics.up),
@@ -1143,17 +1149,17 @@ class SignalLight(QWidget):
 
     def _level_color(self, pct: float | None, warn: float, hot: float) -> tuple[QColor, QColor]:
         if pct is None:
-            return TXT_FAINT, BAR_BLUE
+            return PAL.txt_faint, PAL.bar_blue
         if pct >= hot:
-            return STATE_COLORS[st.FAILED], STATE_COLORS[st.FAILED]
+            return PAL.state(st.FAILED), PAL.state(st.FAILED)
         if pct >= warn:
-            return STATE_COLORS[st.WAITING], STATE_COLORS[st.WAITING]
-        return TXT, BAR_BLUE
+            return PAL.state(st.WAITING), PAL.state(st.WAITING)
+        return PAL.txt, PAL.bar_blue
 
     def _bar(self, p: QPainter, x: float, y: float, w: float, h: float,
              frac: float, color: QColor) -> None:
         p.setPen(Qt.NoPen)
-        p.setBrush(TRACK)
+        p.setBrush(PAL.track)
         p.drawRoundedRect(QRectF(x, y, w, h), h / 2, h / 2)
         fw = max(0.0, min(1.0, frac)) * w
         if fw > 0.5:
@@ -1187,7 +1193,7 @@ class SignalLight(QWidget):
 
         # 只有一段（工作空间或对话名）：直接画，省掉分隔符
         if not work or not name:
-            p.setPen(TXT if name else TXT_DIM)
+            p.setPen(PAL.txt if name else PAL.txt_dim)
             p.drawText(rect, side | Qt.AlignVCenter,
                        fm.elidedText(name or work, Qt.ElideRight, int(rect.width())))
             return
@@ -1196,19 +1202,19 @@ class SignalLight(QWidget):
         w_sep = fm.horizontalAdvance(TASK_SEP)
         w_name = fm.horizontalAdvance(name)
         if w_work + w_sep + w_name > rect.width():
-            p.setPen(TXT)
+            p.setPen(PAL.txt)
             p.drawText(rect, side | Qt.AlignVCenter,
                        fm.elidedText(name, Qt.ElideRight, int(rect.width())))
             return
 
         x = rect.right() - (w_work + w_sep + w_name) if align_right else rect.left()
-        p.setPen(TXT_DIM)
+        p.setPen(PAL.txt_dim)
         p.drawText(QRectF(x, rect.top(), w_work + 1, h), Qt.AlignLeft | Qt.AlignVCenter, work)
         x += w_work
-        p.setPen(TXT_FAINT)
+        p.setPen(PAL.txt_faint)
         p.drawText(QRectF(x, rect.top(), w_sep + 1, h), Qt.AlignLeft | Qt.AlignVCenter, TASK_SEP)
         x += w_sep
-        p.setPen(TXT)
+        p.setPen(PAL.txt)
         p.drawText(QRectF(x, rect.top(), w_name + 1, h), Qt.AlignLeft | Qt.AlignVCenter, name)
 
     def _draw_task_name(self, p: QPainter, rect: QRectF, size: float,
@@ -1358,6 +1364,35 @@ class SignalLight(QWidget):
         self.setWindowFlag(Qt.WindowStaysOnTopHint, on)
         self.show()
 
+    # ---------------- 主题 ----------------
+    def _apply_theme(self, tid: str, save: bool = True) -> bool:
+        """落到具体主题。返回是否真的变了，避免每帧无谓重绘。"""
+        if tid == self._theme_id:
+            return False
+        self._theme_id = tid
+        PAL.set(tid)
+        panel = getattr(self, "panel", None)
+        if panel is not None:
+            panel.apply_theme()
+        if save:
+            self.settings["theme"] = self._theme_pref
+            st.save_settings(self.settings)
+        if getattr(self, "tray", None) is not None:
+            self._update_tray()
+        self.update()
+        return True
+
+    def set_theme(self, pref: str) -> None:
+        self._theme_pref = theme_mod.sanitize(pref)
+        self.settings["theme"] = self._theme_pref
+        st.save_settings(self.settings)
+        self._apply_theme(theme_mod.resolve(self._theme_pref), save=False)
+        self.update()
+
+    def _on_system_scheme(self, *_args) -> None:
+        if self._theme_pref == "auto":
+            self._apply_theme(theme_mod.windows_scheme(), save=False)
+
     def set_show(self, key: str, value: bool) -> None:
         """切换某个显示元素。
 
@@ -1379,16 +1414,7 @@ class SignalLight(QWidget):
 
     def _menu(self) -> QMenu:
         m = QMenu(self)
-        m.setStyleSheet(
-            """
-            QMenu { background:#12161C; color:#E8ECF2; border:1px solid #2E333C;
-                    border-radius:8px; padding:6px; font-family:'Microsoft YaHei UI'; font-size:12px; }
-            QMenu::item { padding:6px 18px 6px 14px; border-radius:5px; }
-            QMenu::item:selected { background:#213043; }
-            QMenu::item:disabled { color:#7C8696; }
-            QMenu::separator { height:1px; background:#242A33; margin:5px 8px; }
-            """
-        )
+        m.setStyleSheet(theme_mod.menu_stylesheet(PAL))
         a_top = QAction("窗口置顶", m)
         a_top.setCheckable(True)
         a_top.setChecked(bool(self.settings.get("on_top", True)))
@@ -1444,6 +1470,26 @@ class SignalLight(QWidget):
             a.setChecked(bool(self.settings.get("show_" + k, True)))
             a.triggered.connect(lambda v, key=k: self.set_show("show_" + key, v))
             mm.addAction(a)
+
+        # 主题：跟随系统 / 浅色 / 深色
+        thm = m.addMenu("主题")
+        g3 = QActionGroup(thm)
+        g3.setExclusive(True)
+        for tid, label in (("auto", "跟随系统"), ("light", "浅色"), ("dark", "深色")):
+            a_t = QAction(label, thm)
+            a_t.setCheckable(True)
+            a_t.setChecked(self._theme_pref == tid)
+            a_t.triggered.connect(lambda _c=False, t=tid: self.set_theme(t))
+            g3.addAction(a_t)
+            thm.addAction(a_t)
+        thm.addSeparator()
+        a_now = QAction(
+            f"当前：{'浅色' if PAL.name == 'light' else '深色'}"
+            + ("（跟随系统）" if self._theme_pref == "auto" else "（手动）"),
+            thm,
+        )
+        a_now.setEnabled(False)
+        thm.addAction(a_now)
 
         # 温度来源
         tm = m.addMenu("温度")
@@ -1589,6 +1635,7 @@ class SignalLight(QWidget):
         # 手动搭对话框而不是用 QInputDialog.getText：挂件是置顶的无边框窗口，
         # 随手弹出的模态框可能被压在别的窗口后面，用户只能去任务栏找。
         dlg = QInputDialog(self)
+        dlg.setStyleSheet(theme_mod.panel_stylesheet(PAL))
         dlg.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         dlg.setInputMode(QInputDialog.TextInput)
         dlg.setWindowTitle("自定义温度命令")
@@ -1610,7 +1657,7 @@ class SignalLight(QWidget):
     def _build_tray(self) -> None:
         self.tray = QSystemTrayIcon(self)
         self.tray.setToolTip("AI 工作信号灯")
-        self.tray.setIcon(self._make_icon(STATE_COLORS[st.IDLE]))
+        self.tray.setIcon(self._make_icon(PAL.state(st.IDLE)))
         self.tray.activated.connect(self._tray_click)
         self.tray.show()
 
@@ -1623,7 +1670,7 @@ class SignalLight(QWidget):
                 self.raise_()
 
     def _update_tray(self) -> None:
-        color = STATE_COLORS.get(self.status.state, STATE_COLORS[st.IDLE])
+        color = PAL.state(self.status.state)
         self.tray.setIcon(self._make_icon(color))
         tip = "AI 工作信号灯\n" + self.status.label
         rows, more = self._visible_rows()
@@ -1662,6 +1709,9 @@ class SignalLight(QWidget):
         p.setBrush(g)
         p.drawEllipse(QRectF(4, 4, 56, 56))
         p.setBrush(color)
+        p.drawEllipse(QRectF(14, 14, 36, 36))
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(PAL.tray_rim, 1.4))
         p.drawEllipse(QRectF(14, 14, 36, 36))
         p.end()
         return QIcon(pm)
