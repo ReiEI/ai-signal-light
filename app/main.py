@@ -121,6 +121,15 @@ MARGIN = 8  # 阴影留白
 # 任务名称里工作空间与对话名的分隔符
 TASK_SEP = " - "
 
+# 视觉层级：执行中的任务是主角，硬件指标退到背景。
+# 多任务原来每行只有一个 6×6 的小色点，三行并排时几乎看不见 ——
+# 现在行首统一给一枚带光晕的状态灯，执行中的再大一档并加左侧强调条。
+TASK_LAMP_W = 20.0          # 行首灯位宽度：灯直径 14 + 6px 呼吸
+TASK_LAMP_R = 6.5          # 非执行中的灯也要看得清，只是不抢主角
+TASK_LAMP_R_RUNNING = 7.0
+ROW_ACCENT_W = 3.0          # 执行中任务左侧强调条宽度
+LAMP_BASE = 8.0             # 单任务大灯半径，原 6.5
+
 # 所有颜色集中到 app/theme.py（浅/深两套 + 状态灯权威色）。
 # PAL 是 theme_mod.PAL 的别名而不是新实例：切换主题时原地换色，
 # 任何一处绘制代码拿到的都是当前主题，不会残留旧 QColor。
@@ -570,24 +579,51 @@ class SignalLight(QWidget):
 
     def _task_line(self, p: QPainter, x: float, y: float, w: float, it,
                    size: float, label_w: float, elapsed: bool = True,
-                   dot: bool = False) -> None:
-        """画一行任务：状态标记 + 工作空间·对话名 + 耗时（右对齐）。
+                   dot: bool = False, lamp: bool = False,
+                   row_h: float = 30.0) -> None:
+        """画一行任务：状态灯 + 状态词（窄版式省略）+ 工作空间·对话名 + 耗时。
 
-        dot=True 时用色点代替状态文字 —— 竖版只有 172px 内宽，
-        "进行中"三个字要吃掉 20% 的宽度，不值。
+        lamp=True 是多任务专用：行首给一枚带光晕的大灯，执行中的任务再叠加
+        淡色行高亮与左侧强调条，其余任务整体降一级，主次一眼可分。
+        dot=True 且没有 lamp 时才是原来那个 6px 小色点（保留给极窄布局）。
         """
         color = PAL.state(it.state)
-        if dot:
+        running = it.state == st.RUNNING
+        prefix = 0.0
+
+        if lamp:
+            if running:
+                # 高亮必须跟着版式行高走：横条只有 22px，写死 29 会盖到下一行。
+                hi = QColor(color)
+                hi.setAlpha(18 if PAL.name == "dark" else 24)
+                p.setPen(Qt.NoPen)
+                p.setBrush(hi)
+                p.drawRoundedRect(QRectF(x - 5, y - 1, w + 10, row_h - 1), 6, 6)
+                acc = QColor(color)
+                acc.setAlpha(220)
+                p.setBrush(acc)
+                p.drawRoundedRect(QRectF(x - 7, y + 2, ROW_ACCENT_W, row_h - 7), 1.5, 1.5)
+            r = TASK_LAMP_R_RUNNING if running else TASK_LAMP_R
+            self._row_lamp(p, x + TASK_LAMP_W / 2.0, y + 7.5, it.state, color, r)
+            prefix += TASK_LAMP_W
+
+        if lamp and dot:
+            pass  # 窄版式：有灯就够了，状态词会吃掉 20% 宽度
+        elif dot:
             p.setPen(Qt.NoPen)
             p.setBrush(color)
             p.drawEllipse(QRectF(x + 2, y + 5, 6, 6))
         else:
-            f = _f(size, QFont.DemiBold)
+            f = _f(size + (0.5 if running and lamp else 0), QFont.DemiBold)
             p.setFont(f)
             p.setPen(color if it.state != st.IDLE else PAL.txt_dim)
             label = st.LABELS.get(it.state, it.state)
-            p.drawText(QRectF(x, y, max(label_w, QFontMetrics(f).horizontalAdvance(label) + 2), 15),
+            p.drawText(QRectF(x + prefix, y,
+                              max(label_w, QFontMetrics(f).horizontalAdvance(label) + 2), 15),
                        Qt.AlignLeft | Qt.AlignVCenter, label)
+            # +3 是状态词与名称之间的呼吸位：宽度正好贴住时两个不同颜色的词
+            # 会黏成一句，读起来像"进行中AI学习"。
+            prefix += label_w + 3
 
         tw = 0.0
         if elapsed and it.state in (st.RUNNING, st.WAITING, st.FAILED) and it.ts:
@@ -598,11 +634,11 @@ class SignalLight(QWidget):
                 p.setPen(PAL.txt_faint)
                 p.drawText(QRectF(x + w - tw, y, tw, 15),
                            Qt.AlignRight | Qt.AlignVCenter, el)
-        # +3 是标签与名称之间的呼吸位：状态词宽度正好等于 label_w 时，
-        # 两个不同颜色的词会黏成一句，读起来像"进行中AI学习"。
-        name_x = x + label_w + 3
+
+        name_x = x + prefix
         self._draw_name(p, QRectF(name_x, y, max(20.0, x + w - tw - 4 - name_x), 15),
-                        size, it.workspace, it.title)
+                        size, it.workspace, it.title,
+                        emphasis=running and lamp, dim=lamp and not running)
 
     def _more_line(self, p: QPainter, x: float, y: float, w: float,
                    more: int, size: float) -> None:
@@ -612,11 +648,13 @@ class SignalLight(QWidget):
                    f"另有 {more} 个任务在跑（右键 → 任务清单）")
 
     def _task_detail(self, p: QPainter, x: float, y: float, w: float, it,
-                     size: float) -> None:
+                     size: float, dim: bool = False) -> None:
         detail = (it.detail or "").strip()
         if not detail:
             return
-        self._draw_elided(p, detail, _f(size), PAL.txt_dim, QRectF(x, y, w, 14))
+        self._draw_elided(p, detail, _f(size + (0.0 if dim else 0.5)),
+                          PAL.txt_faint if dim else PAL.txt_dim,
+                          QRectF(x, y, w, 14))
 
     # ---- 标准卡：400×138（开满时的尺寸，关区块会缩）----
     def _paint_standard(self, p: QPainter, card: QRectF) -> None:
@@ -640,7 +678,7 @@ class SignalLight(QWidget):
         row1_y = card.top() + 11
         row2_y = card.top() + 31
 
-        f_label = _f(10, QFont.DemiBold)
+        f_label = _f(10.5 if stt.state == st.RUNNING else 10, QFont.DemiBold)
         p.setFont(f_label)
         p.setPen(color if stt.state != st.IDLE else PAL.txt_dim)
         label = self._status_label()
@@ -652,7 +690,7 @@ class SignalLight(QWidget):
             self._draw_task_name(
                 p,
                 QRectF(text_x + lw + 10, row1_y, card.right() - pad - text_x - lw - 10, 19),
-                9, align_right=True,
+                9, align_right=True, emphasis=stt.state == st.RUNNING,
             )
 
         # 第二行左：细节（多源并发时带出其余任务数）
@@ -729,12 +767,14 @@ class SignalLight(QWidget):
         pad = 14.0
         x = card.left() + pad
         inner = card.width() - pad * 2
-        # 状态词宽度 + 3px 间隙；指令行缩进与名称起点对齐
-        indent = 40.0 + 3.0
+        # 状态词宽度 + 3px 间隙；指令行缩进与名称起点对齐。
+        # 多一行首灯位后，名称/detail 都要整体右移，否则会压在灯上。
+        indent = TASK_LAMP_W + 40.0 + 3.0
         y = card.top() + 11.0
         for it in rows:
-            self._task_line(p, x, y, inner, it, 9, 40.0)
-            self._task_detail(p, x + indent, y + 15, inner - indent - 44, it, 8.5)
+            self._task_line(p, x, y, inner, it, 9, 40.0, lamp=True)
+            self._task_detail(p, x + indent, y + 15, inner - indent - 44, it, 8.5,
+                              dim=it.state != st.RUNNING)
             y += 30.0
         if more:
             self._more_line(p, x, y, inner, more, 8.5)
@@ -813,8 +853,8 @@ class SignalLight(QWidget):
 
         self._draw_lamp(p, card.left() + pad + 6, card.top() + 17, stt.state, color)
 
-        text_x = card.left() + pad + 22
-        f_label = _f(9.5, QFont.DemiBold)
+        text_x = card.left() + pad + 26
+        f_label = _f(10 if stt.state == st.RUNNING else 9.5, QFont.DemiBold)
         p.setFont(f_label)
         p.setPen(color if stt.state != st.IDLE else PAL.txt_dim)
         label = self._status_label()
@@ -825,7 +865,7 @@ class SignalLight(QWidget):
             self._draw_task_name(
                 p,
                 QRectF(text_x + lw + 8, card.top() + 7, card.right() - pad - text_x - lw - 8, 19),
-                8.5, align_right=True,
+                8.5, align_right=True, emphasis=stt.state == st.RUNNING,
             )
 
         # 第二行：左详情 + 右指标串 +（散热中时）一个停止按钮
@@ -845,7 +885,7 @@ class SignalLight(QWidget):
         )
         if micro:
             p.setFont(_f(7, QFont.Normal, FONT_MONO))
-            p.setPen(PAL.txt_faint)
+            p.setPen(PAL.metric_label)
             p.drawText(
                 QRectF(card.right() - pad - stop_w - mw - 2, card.top() + 26, mw + 2, 16),
                 Qt.AlignRight | Qt.AlignVCenter, micro,
@@ -872,7 +912,7 @@ class SignalLight(QWidget):
         micro = self._micro_metrics()
         stop_w = 20.0 if self.cool is not None else 0.0
         self._draw_elided(
-            p, micro, _f(8, QFont.Normal, FONT_MONO), PAL.txt_dim,
+            p, micro, _f(8, QFont.Normal, FONT_MONO), PAL.metric_value,
             QRectF(card.left() + pad, card.top(),
                    card.width() - pad * 2 - stop_w, card.height()),
         )
@@ -901,7 +941,7 @@ class SignalLight(QWidget):
         inner = card.width() - pad * 2
         y = card.top() + 6.0
         for it in rows:
-            self._task_line(p, x, y, inner, it, 8.5, 36.0)
+            self._task_line(p, x, y, inner, it, 8.5, 36.0, lamp=True, row_h=22.0)
             y += 22.0
         if more:
             self._more_line(p, x, y, inner, more, 8.0)
@@ -913,7 +953,7 @@ class SignalLight(QWidget):
         stop_w = 20.0 if self.cool is not None else 0.0
         if micro:
             p.setFont(_f(7, QFont.Normal, FONT_MONO))
-            p.setPen(PAL.txt_faint)
+            p.setPen(PAL.metric_label)
             p.drawText(QRectF(card.right() - pad - stop_w - mw - 2, y, mw + 2, 16),
                        Qt.AlignRight | Qt.AlignVCenter, micro)
         if stop_w:
@@ -975,8 +1015,8 @@ class SignalLight(QWidget):
             if not multi:
                 self._draw_lamp(p, card.left() + pad + 7, card.top() + 22, stt.state, color)
 
-            text_x = card.left() + pad + (0.0 if multi else 20.0)
-            p.setFont(_f(10, QFont.DemiBold))
+            text_x = card.left() + pad + (0.0 if multi else 24.0)
+            p.setFont(_f(10.5 if stt.state == st.RUNNING else 10, QFont.DemiBold))
             p.setPen(color if stt.state != st.IDLE else PAL.txt_dim)
             p.drawText(
                 QRectF(text_x, card.top() + 12, card.right() - pad - text_x, 19),
@@ -986,15 +1026,19 @@ class SignalLight(QWidget):
             if multi:
                 y = card.top() + 35.0
                 for it in rows:
-                    self._task_line(p, card.left() + pad, y, inner_w, it, 8.5, 12.0, dot=True)
-                    self._task_detail(p, card.left() + pad + 15.0, y + 15, inner_w - 15.0, it, 7.5)
+                    self._task_line(p, card.left() + pad, y, inner_w, it, 8.5, 12.0,
+                                    dot=True, lamp=True)
+                    self._task_detail(p, card.left() + pad + TASK_LAMP_W + 3.0, y + 15,
+                                      inner_w - TASK_LAMP_W - 3.0, it, 7.5,
+                                      dim=it.state != st.RUNNING)
                     y += 30.0
                 if more:
                     self._more_line(p, card.left() + pad, y, inner_w, more, 7.5)
             else:
                 if stt.workspace or stt.title:
                     self._draw_task_name(
-                        p, QRectF(card.left() + pad, card.top() + 35, inner_w, 15), 8.5,
+                        p, QRectF(card.left() + pad, card.top() + 35, inner_w, 15),
+                        8.5, emphasis=stt.state == st.RUNNING,
                     )
                 detail = stt.detail or ("等待任务信号" if stt.state == st.IDLE else "")
                 if stt.peers > 0:
@@ -1088,22 +1132,24 @@ class SignalLight(QWidget):
         self, p: QPainter, x: float, y: float, w: float, label: str, value: str,
         pct: float | None = None, sub: str = "", warn: float = 75.0, hot: float = 90.0,
     ) -> None:
-        p.setFont(_f(7.5))
-        p.setPen(PAL.txt_faint)
+        alert = pct is not None and pct >= warn
+        p.setFont(_f(7))
+        p.setPen(PAL.metric_label)
         p.drawText(QRectF(x, y, w * 0.45, 12), Qt.AlignLeft | Qt.AlignVCenter, label)
 
         vcol, bcol = self._level_color(pct, warn, hot)
-        p.setFont(_f(10, QFont.DemiBold, FONT_MONO))
-        p.setPen(vcol)
+        p.setFont(_f(9.5, QFont.Normal, FONT_MONO))
+        p.setPen(vcol if alert else PAL.metric_value)
         p.drawText(
             QRectF(x + w * 0.45, y - 3, w * 0.55, 18),
             Qt.AlignRight | Qt.AlignVCenter, value,
         )
         if pct is not None:
-            self._bar(p, x, y + 17, w, 3.0, pct / 100.0, bcol)
+            self._bar(p, x, y + 17, w, 2.5, pct / 100.0,
+                      bcol if alert else PAL.metric_bar)
         elif sub:
             p.setFont(_f(7))
-            p.setPen(PAL.txt_faint)
+            p.setPen(PAL.metric_label)
             p.drawText(
                 QRectF(x + w * 0.55, y + 15, w * 0.45, 12),
                 Qt.AlignRight | Qt.AlignVCenter, sub,
@@ -1113,35 +1159,39 @@ class SignalLight(QWidget):
         self, p: QPainter, x: float, y: float, w: float, label: str,
         value: str, sub: str, pct: float | None, warn: float = 75.0, hot: float = 90.0,
     ) -> None:
-        p.setFont(_f(7.5))
-        p.setPen(PAL.txt_faint)
+        # 硬件指标整体退一档：字号、字重、颜色都低于任务区。
+        # 但告警（>= warn）必须保留原来的黄/红色，安全信息不能被"弱化"掉。
+        alert = pct is not None and pct >= warn
+        vcol, bcol = self._level_color(pct, warn, hot)
+        p.setFont(_f(7))
+        p.setPen(PAL.metric_label)
         p.drawText(QRectF(x, y, w, 12), Qt.AlignLeft | Qt.AlignVCenter, label)
 
-        vcol, bcol = self._level_color(pct, warn, hot)
-        p.setFont(_f(10.5, QFont.DemiBold, FONT_MONO))
-        p.setPen(vcol)
+        p.setFont(_f(9.5, QFont.Normal, FONT_MONO))
+        p.setPen(vcol if alert else PAL.metric_value)
         p.drawText(QRectF(x, y + 13, w, 18), Qt.AlignLeft | Qt.AlignVCenter, value)
 
         if sub:
-            p.setFont(_f(7.5))
-            p.setPen(PAL.txt_faint)
+            p.setFont(_f(7))
+            p.setPen(PAL.metric_label)
             p.drawText(QRectF(x, y + 32, w, 12), Qt.AlignLeft | Qt.AlignVCenter, sub)
 
-        self._bar(p, x, y + 46, w - 6, 3.0, (pct or 0.0) / 100.0, bcol)
+        self._bar(p, x, y + 46, w - 6, 2.5, (pct or 0.0) / 100.0,
+                  bcol if alert else PAL.metric_bar)
 
     def _net_col(self, p: QPainter, x: float, y: float, w: float) -> None:
-        p.setFont(_f(7.5))
-        p.setPen(PAL.txt_faint)
+        p.setFont(_f(7))
+        p.setPen(PAL.metric_label)
         p.drawText(QRectF(x, y, w, 12), Qt.AlignLeft | Qt.AlignVCenter, "网络")
 
-        p.setFont(_f(10.5, QFont.DemiBold, FONT_MONO))
-        p.setPen(PAL.txt)
+        p.setFont(_f(9.5, QFont.Normal, FONT_MONO))
+        p.setPen(PAL.metric_value)
         p.drawText(
             QRectF(x, y + 13, w, 18), Qt.AlignLeft | Qt.AlignVCenter,
             "↓" + metrics_mod.fmt_rate(self.metrics.down),
         )
-        p.setFont(_f(7.5))
-        p.setPen(PAL.txt_faint)
+        p.setFont(_f(7))
+        p.setPen(PAL.metric_label)
         p.drawText(
             QRectF(x, y + 32, w, 12), Qt.AlignLeft | Qt.AlignVCenter,
             "↑" + metrics_mod.fmt_rate(self.metrics.up),
@@ -1180,20 +1230,25 @@ class SignalLight(QWidget):
     # 恰好先砍掉对话名（信息主体），留下工作空间（长期不变的上下文）。
     # 所以这里按真实可用宽度做决策：放得下就分段画，放不下只留对话名。
     def _draw_name(self, p: QPainter, rect: QRectF, size: float, work: str, name: str,
-                   align_right: bool = False) -> None:
+                   align_right: bool = False, emphasis: bool = False,
+                   dim: bool = False) -> None:
         work = (work or "").strip()
         name = (name or "").strip()
         if not work and not name:
             return
-        f = _f(size)
+        # emphasis：执行中的任务名加粗提亮；dim：同一列表里其它任务降一级。
+        f = _f(size + (0.5 if emphasis else 0),
+               QFont.DemiBold if emphasis else QFont.Normal)
         p.setFont(f)
         fm = QFontMetrics(f)
         h = rect.height()
         side = Qt.AlignRight if align_right else Qt.AlignLeft
+        main_col = PAL.txt_dim if dim else PAL.txt
+        sub_col = PAL.txt_faint if dim else PAL.txt_dim
 
         # 只有一段（工作空间或对话名）：直接画，省掉分隔符
         if not work or not name:
-            p.setPen(PAL.txt if name else PAL.txt_dim)
+            p.setPen(main_col if name else sub_col)
             p.drawText(rect, side | Qt.AlignVCenter,
                        fm.elidedText(name or work, Qt.ElideRight, int(rect.width())))
             return
@@ -1202,24 +1257,40 @@ class SignalLight(QWidget):
         w_sep = fm.horizontalAdvance(TASK_SEP)
         w_name = fm.horizontalAdvance(name)
         if w_work + w_sep + w_name > rect.width():
-            p.setPen(PAL.txt)
+            # 窄行里也要尽量保住「工作空间 - 对话名」这个结构：先给工作空间
+            # 留位，剩下的宽度才对对话名做省略，别一超宽就把工作空间整段丢掉。
+            keep = rect.width() - w_work - w_sep - 2
+            if not align_right and keep >= 26:
+                p.setPen(sub_col)
+                p.drawText(QRectF(rect.left(), rect.top(), w_work + 1, h),
+                           Qt.AlignLeft | Qt.AlignVCenter, work)
+                p.setPen(PAL.txt_faint)
+                p.drawText(QRectF(rect.left() + w_work, rect.top(), w_sep + 1, h),
+                           Qt.AlignLeft | Qt.AlignVCenter, TASK_SEP)
+                p.setPen(main_col)
+                p.drawText(QRectF(rect.left() + w_work + w_sep, rect.top(), keep, h),
+                           Qt.AlignLeft | Qt.AlignVCenter,
+                           fm.elidedText(name, Qt.ElideRight, int(keep)))
+                return
+            p.setPen(main_col)
             p.drawText(rect, side | Qt.AlignVCenter,
                        fm.elidedText(name, Qt.ElideRight, int(rect.width())))
             return
 
         x = rect.right() - (w_work + w_sep + w_name) if align_right else rect.left()
-        p.setPen(PAL.txt_dim)
+        p.setPen(sub_col)
         p.drawText(QRectF(x, rect.top(), w_work + 1, h), Qt.AlignLeft | Qt.AlignVCenter, work)
         x += w_work
         p.setPen(PAL.txt_faint)
         p.drawText(QRectF(x, rect.top(), w_sep + 1, h), Qt.AlignLeft | Qt.AlignVCenter, TASK_SEP)
         x += w_sep
-        p.setPen(PAL.txt)
+        p.setPen(main_col)
         p.drawText(QRectF(x, rect.top(), w_name + 1, h), Qt.AlignLeft | Qt.AlignVCenter, name)
 
     def _draw_task_name(self, p: QPainter, rect: QRectF, size: float,
-                        align_right: bool = False) -> None:
-        self._draw_name(p, rect, size, self.status.workspace, self.status.title, align_right)
+                        align_right: bool = False, emphasis: bool = False) -> None:
+        self._draw_name(p, rect, size, self.status.workspace, self.status.title,
+                        align_right, emphasis=emphasis)
 
     def _draw_elided(self, p: QPainter, text: str, font: QFont, color: QColor,
                      rect: QRectF, align_right: bool = False) -> None:
@@ -1231,8 +1302,49 @@ class SignalLight(QWidget):
         elided = fm.elidedText(text, Qt.ElideRight, int(rect.width()))
         p.drawText(rect, (Qt.AlignRight if align_right else Qt.AlignLeft) | Qt.AlignVCenter, elided)
 
+    def _row_lamp(self, p: QPainter, cx: float, cy: float, state: str,
+                  color: QColor, r: float) -> None:
+        """多任务行状态灯：带光晕的实心灯，直径 12~14px。
+
+        原来每行只有一个 6×6 的小色点，三行并排时几乎看不出状态；
+        这枚灯和单任务大灯是同一套视觉语言（光晕 + 灯芯 + 高光），
+        只是不做旋转动画，避免多行同时闪成一团。
+        """
+        p.setPen(Qt.NoPen)
+        glow = 95.0 if state == st.RUNNING else 72.0
+        outer = r * 2.4
+        gr = QRadialGradient(cx, cy, outer)
+        c0 = QColor(color)
+        c0.setAlpha(int(glow))
+        c1 = QColor(color)
+        c1.setAlpha(int(glow * 0.30))
+        c2 = QColor(color)
+        c2.setAlpha(0)
+        gr.setColorAt(0.0, c0)
+        gr.setColorAt(0.45, c1)
+        gr.setColorAt(1.0, c2)
+        p.setBrush(gr)
+        p.drawEllipse(QRectF(cx - outer, cy - outer, outer * 2, outer * 2))
+
+        if state == st.RUNNING:
+            ring = QColor(color)
+            ring.setAlpha(150)
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(ring, 1.2, Qt.SolidLine, Qt.RoundCap))
+            rr = r + 2.5
+            p.drawEllipse(QRectF(cx - rr, cy - rr, rr * 2, rr * 2))
+            p.setPen(Qt.NoPen)
+
+        core = QColor(color)
+        if state == st.IDLE:
+            core.setAlpha(190)
+        p.setBrush(core)
+        p.drawEllipse(QRectF(cx - r, cy - r, r * 2, r * 2))
+        p.setBrush(QColor(255, 255, 255, 70))
+        p.drawEllipse(QRectF(cx - r * 0.42, cy - r * 0.62, r * 0.62, r * 0.5))
+
     def _draw_lamp(self, p: QPainter, cx: float, cy: float, state: str, color: QColor) -> None:
-        base = 6.5
+        base = LAMP_BASE
         ph = self._phase
         t_since = time.time() - self._state_t0
         r = base
@@ -1255,9 +1367,9 @@ class SignalLight(QWidget):
             glow = 150 + 45 * (0.5 + 0.5 * math.sin(ph * 1.3))
             r = base
 
-        # 外发光（半径 20：再大会压到右侧状态文字）
+        # 外发光（半径 22：灯芯加大后要跟着涨一点，再大会压到右侧状态文字）
         p.setPen(Qt.NoPen)
-        gr = QRadialGradient(cx, cy, 20)
+        gr = QRadialGradient(cx, cy, 22)
         c0 = QColor(color)
         c0.setAlpha(int(max(0, min(255, glow))))
         c1 = QColor(color)
@@ -1268,7 +1380,7 @@ class SignalLight(QWidget):
         gr.setColorAt(0.45, c1)
         gr.setColorAt(1.0, c2)
         p.setBrush(gr)
-        p.drawEllipse(QRectF(cx - 20, cy - 20, 40, 40))
+        p.drawEllipse(QRectF(cx - 22, cy - 22, 44, 44))
 
         # running: 旋转弧
         if state == st.RUNNING:
@@ -1276,7 +1388,7 @@ class SignalLight(QWidget):
             ring = QColor(color)
             ring.setAlpha(170)
             p.setPen(QPen(ring, 1.6, Qt.SolidLine, Qt.RoundCap))
-            rect = QRectF(cx - 12, cy - 12, 24, 24)
+            rect = QRectF(cx - 14, cy - 14, 28, 28)
             start = int((math.degrees(ph * 3.2)) % 360)
             p.drawArc(rect, start * 16, 70 * 16)
 

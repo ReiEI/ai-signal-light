@@ -73,6 +73,7 @@ finally:
 print("3) 两套调色板完整性与对比度")
 fields = ("card_bg", "card_border", "txt", "txt_dim", "txt_faint", "divider", "track",
           "bar_blue", "amber", "menu_bg", "menu_fg", "menu_sel", "tray_rim", "chip_bg",
+          "metric_value", "metric_label", "metric_bar",
           "panel_btn", "panel_primary_bg", "panel_danger_bg")
 for tid in ("dark", "light"):
     pal = theme.Palette(tid)
@@ -90,6 +91,13 @@ for tid in ("dark", "light"):
     for k in ("running", "done", "waiting", "failed"):
         cr = theme.contrast(pal.state(k), pal.card_bg)
         check(f"{tid} 状态灯 {k} 对比度 >= 2.2", cr >= 2.2, round(cr, 2))
+    # 硬件指标是"相对弱化"而不是"看不清"：比主文字暗，但仍守住可读性下限。
+    mv = theme.contrast(pal.metric_value, pal.card_bg)
+    ml = theme.contrast(pal.metric_label, pal.card_bg)
+    mt = theme.contrast(pal.txt, pal.card_bg)
+    check(f"{tid} 指标数值弱化但仍 >= 3.5", 3.5 <= mv < mt, round(mv, 2))
+    check(f"{tid} 指标标签弱化但仍 >= 2.8", 2.8 <= ml < mt, round(ml, 2))
+    check(f"{tid} 指标色与主文字不同", pal.metric_value.name() != pal.txt.name())
 check("浅深主色不同", theme.Palette("dark").txt.name() != theme.Palette("light").txt.name())
 check("浅深菜单样式不同", theme.menu_stylesheet(theme.Palette("dark")) != theme.menu_stylesheet(theme.Palette("light")))
 check("浅深面板样式不同", theme.panel_stylesheet(theme.Palette("dark")) != theme.panel_stylesheet(theme.Palette("light")))
@@ -106,6 +114,15 @@ check("面板 QSS 由主题生成", "theme.panel_stylesheet(PAL)" in panel_src)
 check("温度命令输入框也走主题", "dlg.setStyleSheet(theme_mod.panel_stylesheet(PAL))" in main_src)
 check("面板有 apply_theme", "def apply_theme(self)" in panel_src)
 check("面板无旧硬编码颜色", 'BG = "#12161C"' not in panel_src)
+
+theme_src = (ROOT / "app" / "theme.py").read_text(encoding="utf-8")
+check("两套调色板都有指标弱化色",
+      all(theme_src.count(f'"{k}"') == 2 for k in ("metric_value", "metric_label", "metric_bar")))
+check("多任务行改用大状态灯", "def _row_lamp(" in main_src and "lamp=True" in main_src)
+check("执行中任务有强调与提亮", "ROW_ACCENT_W" in main_src
+      and "emphasis=running and lamp" in main_src)
+check("单任务大灯放大", "LAMP_BASE = 8.0" in main_src)
+check("行高亮按版式行高计算", "row_h - 1" in main_src and "row_h=22.0" in main_src)
 
 print("5) 运行时联动")
 w = M.SignalLight(demo=False)
@@ -177,6 +194,25 @@ i_dark = w._make_icon(M.PAL.state("running")).pixmap(32, 32).toImage()
 M.PAL.set("light")
 i_light = w._make_icon(M.PAL.state("running")).pixmap(32, 32).toImage()
 check("托盘状态灯随主题换色", i_dark != i_light)
+
+print("6) 执行中任务的强调在浅深两套下都成立")
+from PySide6.QtGui import QImage, QPainter  # noqa: E402
+
+
+def focus_alpha(tid: str) -> int:
+    M.PAL.set(tid)
+    q = QImage(400, 40, QImage.Format_ARGB32_Premultiplied)
+    q.fill(Qt.transparent)
+    pp = QPainter(q)
+    pp.setRenderHint(QPainter.Antialiasing, True)
+    it = st.Slot("workbuddy", "focus", st.RUNNING, "对话", "指令", 1, 999, 1, "工作")
+    w._task_line(pp, 20.0, 5.0, 360.0, it, 9, 40.0, lamp=True)
+    pp.end()
+    return q.pixelColor(200, 25).alpha()
+
+
+for tid in ("dark", "light"):
+    check(f"{tid} 下执行中任务仍有行高亮", focus_alpha(tid) > 0)
 
 print(f"\n结果: {ok} 通过 / {bad} 失败")
 sys.exit(1 if bad else 0)
