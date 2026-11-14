@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import threading
@@ -119,7 +120,11 @@ def _log(line: str) -> None:
 # 宿主把 cwd 一起传进来了，但目录名不一定是给人看的：
 # 用户在 WorkBuddy 里改过工作区显示名时，真实显示名只存在这份映射里。
 # 目录名是时间戳（C:\...\20260412160055）时也一样，只能靠映射兜底。
-_WS_FILE = Path.home() / ".workbuddy" / "workspace-display-names.json"
+_WS_FILE = (
+    Path(os.environ["AISIGNAL_HOME"]) / "workspace-display-names.json"
+    if os.environ.get("AISIGNAL_HOME")
+    else Path.home() / ".workbuddy" / "workspace-display-names.json"
+)
 _ws_cache: dict | None = None
 
 
@@ -139,7 +144,12 @@ def _display_names() -> dict:
 
 
 def _workspace_name(ev: dict) -> str:
-    """cwd -> 工作空间显示名。取不到就返回空，绝不让标题因此变空。"""
+    """cwd -> 工作空间显示名。取不到就返回空，绝不让标题因此变空。
+
+    只认 workspace-display-names.json 的映射：命中才算工作空间，
+    拿不到就返回空 —— 独立任务/对话的 cwd 不在这份映射里，
+    以前退回目录名会把 ~/Downloads、/tmp 之类冒充成工作空间名。
+    """
     cwd = str(ev.get("cwd") or "").strip()
     if not cwd:
         return ""
@@ -149,15 +159,7 @@ def _workspace_name(ev: dict) -> str:
         name = str(hit.get("displayName") or "").strip()
         if name:
             return _plain(name, 12)
-
-    # 退回目录名。形如 20260412160055 的全数字目录没有辨识度，往上取一级。
-    parts = [p for p in norm.split("/") if p]
-    if not parts:
-        return ""
-    name = parts[-1]
-    if name.isdigit() and len(parts) >= 2:
-        name = parts[-2]
-    return _plain(name, 12)
+    return ""
 
 
 # ---------------- 会话标题 ----------------
@@ -301,10 +303,10 @@ def handle(ev: dict) -> str:
         # started 必须带上原始开始时间，否则耗时会被心跳重置成"刚刚"。
         cur = st.read_slot(SRC, sid)
         if cur and cur.state == st.RUNNING:
-            # 标题在首轮回复前才写进 transcript，首次提交时还读不到。
-            # 所以只在"还没有标题"时补读一次；拿到之后心跳不再碰磁盘，
-            # 否则每个工具调用都要多读 64KB。
-            title = cur.title or _conv_title(ev)
+            # 对话标题优先于占位文本：独立任务首轮 title = brief，
+            # 如果只看 cur.title 非空就跳过 transcript，真正的对话标题永远补不上。
+            # _conv_title 只读尾部 24KB，拿到后写回 title，后续心跳同值不重写。
+            title = _conv_title(ev) or cur.title
             st.write_slot(SRC, sid, st.RUNNING, title, cur.detail, ttl=TTL_RUN,
                           started=cur.ts, workspace=cur.workspace or ws)
             return "beat"
