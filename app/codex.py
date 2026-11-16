@@ -94,6 +94,10 @@ def _title_from(item: dict) -> str:
             s = line.strip()
             if not s or s[0] in "#<`|>":
                 continue
+            if "questionItemId" in s or "send_user_message_question_reply" in s:
+                continue
+            if re.fullmatch(r"(已切换|已完成|已恢复|已打开|已确认|可以|允许|同意|好|好的|继续|完成|是|否|yes|no|ok|done|ready)[。！.!]*", s, re.I):
+                continue
             s = re.sub(r"\s+", " ", s)
             return s[:40]
     return ""
@@ -143,7 +147,10 @@ class CodexWatcher:
         # 而内容其实正在追加。
         if self._path is not None:
             try:
-                if self._path.exists() and self._path.stat().st_size > self._offset:
+                if self._path.exists() and (
+                    self._path.stat().st_size > self._offset
+                    or (self._running and now - self._last_growth <= MAX_SILENT)
+                ):
                     return self._path
             except OSError:
                 self._path = None
@@ -151,7 +158,7 @@ class CodexWatcher:
         best: tuple[float, Path] | None = None
         for p in self._candidates:
             t = _name_time(p) or p.stat().st_mtime
-            if now - t > IDLE_WINDOW:
+            if now - t > IDLE_WINDOW and p != self._path and not self._tail_state(p):
                 continue
             if best is None or t > best[0]:
                 best = (t, p)
@@ -167,15 +174,22 @@ class CodexWatcher:
         try:
             size = path.stat().st_size
             with open(path, "rb") as f:
-                f.seek(max(0, size - 256 * 1024))
+                f.seek(max(0, size - 16 * 1024 * 1024))
                 data = f.read()
         except OSError:
             return []
 
+        last_activity = 0.0
         last_start = -1
         last_done = -1
         last_prompt: tuple[int, dict] | None = None
         for i, raw in enumerate(data.splitlines()):
+            try:
+                stamp = json.loads(raw).get("timestamp", "")
+                if stamp:
+                    last_activity = max(last_activity, _dt.datetime.fromisoformat(stamp.replace("Z", "+00:00")).timestamp())
+            except (ValueError, TypeError, AttributeError, OSError):
+                pass
             ev = _parse(raw)
             if not ev:
                 continue
@@ -187,6 +201,10 @@ class CodexWatcher:
                 last_prompt = (i, ev[1])
 
         if last_start < 0 or last_done > last_start:
+            return []
+        # File creation time is not the time of a resumed turn. Use the latest
+        # event timestamp; keep filename freshness for older event formats.
+        if time.time() - max(last_activity, _name_time(path)) > MAX_SILENT:
             return []
         out: list[tuple[str, dict]] = [("start", {})]
         if last_prompt and last_prompt[0] > last_start:

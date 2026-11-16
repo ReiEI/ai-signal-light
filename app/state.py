@@ -225,7 +225,19 @@ def write_state(
 
 SLOT_DIR = APP_DIR / "slots"
 
-SOURCE_LABELS = {"workbuddy": "WorkBuddy", "codex": "Codex", "manual": ""}
+SOURCE_LABELS = {"workbuddy": "WorkBuddy", "codex": "Codex", "chatgpt": "ChatGPT", "manual": ""}
+
+def agent_label(source: str) -> str:
+    """Display the producer's identity without changing task data or priority."""
+    return SOURCE_LABELS.get(source, source or "")
+
+
+def task_name(task) -> str:
+    """Shared label for menus and tray; cards render the source as a badge."""
+    name = " - ".join(x for x in (task.workspace, task.title) if x) or "任务"
+    source = agent_label(getattr(task, "source", ""))
+    return f"{source} · {name}" if source else name
+
 
 
 class Slot:

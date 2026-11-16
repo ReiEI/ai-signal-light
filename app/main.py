@@ -53,6 +53,7 @@ from PySide6.QtWidgets import (
 sys.path.insert(0, str(Path(__file__).parent))
 
 import codex as codex_mod  # noqa: E402
+import desktop as desktop_mod  # noqa: E402
 import cooling as cooling_mod  # noqa: E402
 import metrics as metrics_mod  # noqa: E402
 import state as st  # noqa: E402
@@ -194,6 +195,7 @@ class SignalLight(QWidget):
         self._theme_id = PAL.name
         self.reader = st.StateReader()
         self.codex = codex_mod.CodexWatcher()
+        self.desktop = desktop_mod.DesktopWatcher()
         self.metrics = metrics_mod.Metrics()
         self.thermal = metrics_mod.Thermal(cmd=str(self.settings.get("temp_cmd") or ""))
         self.cooling = cooling_mod.Cooling()
@@ -418,6 +420,7 @@ class SignalLight(QWidget):
             return
         # Codex 监听器自己写槽位，这里只需在它之后统一重读
         self.codex.poll()
+        self.desktop.poll()
         slots = st.read_slots()
         single = self.reader.read()
         new = st.compose(slots, single)
@@ -434,6 +437,12 @@ class SignalLight(QWidget):
             self._on_state_change()
 
     def _on_state_change(self) -> None:
+        items = self.rows or [self.status]
+        self.setToolTip("\n\n".join(
+            f"{st.SOURCE_LABELS.get(getattr(item, 'source', ''), '')} · {item.title}\n"
+            f"{st.LABELS.get(item.state, item.state)}\n问题：{item.detail}"
+            for item in items if item.state != st.IDLE
+        ))
         if self.status.state != self._prev_state:
             self._state_t0 = time.time()
             self._prev_state = self.status.state
@@ -642,8 +651,8 @@ class SignalLight(QWidget):
                            Qt.AlignRight | Qt.AlignVCenter, el)
 
         name_x = x + prefix
-        self._draw_name(p, QRectF(name_x, y, max(20.0, x + w - tw - 4 - name_x), 15),
-                        size, it.workspace, it.title,
+        self._draw_agent_task_name(p, QRectF(name_x, y, max(20.0, x + w - tw - 4 - name_x), 15),
+                                  size, it,
                         emphasis=running and lamp, dim=lamp and not running)
 
     def _more_line(self, p: QPainter, x: float, y: float, w: float,
@@ -1293,10 +1302,34 @@ class SignalLight(QWidget):
         p.setPen(main_col)
         p.drawText(QRectF(x, rect.top(), w_name + 1, h), Qt.AlignLeft | Qt.AlignVCenter, name)
 
+    def _draw_agent_task_name(self, p: QPainter, rect: QRectF, size: float, item,
+                              align_right: bool = False, emphasis: bool = False,
+                              dim: bool = False) -> None:
+        """Keep the agent source visible even when a long task name is elided."""
+        label = st.agent_label(getattr(item, "source", ""))
+        if label:
+            font = _f(max(8.0, size - 1), QFont.DemiBold)
+            badge_w = min(rect.width(), QFontMetrics(font).horizontalAdvance(label) + 10.0)
+            badge = QRectF(rect.left(), rect.top() + 1, badge_w, max(10.0, rect.height() - 2))
+            fill = QColor(PAL.txt_faint)
+            fill.setAlpha(24)
+            p.setPen(Qt.NoPen)
+            p.setBrush(fill)
+            p.drawRoundedRect(badge, 3, 3)
+            p.setFont(font)
+            p.setPen(PAL.txt_faint if dim else PAL.txt_dim)
+            p.drawText(badge.adjusted(4, 0, -4, 0), Qt.AlignLeft | Qt.AlignVCenter,
+                       QFontMetrics(font).elidedText(label, Qt.ElideRight, max(1, int(badge_w - 8))))
+            rect = QRectF(rect.left() + badge_w + 5, rect.top(),
+                          max(0.0, rect.width() - badge_w - 5), rect.height())
+        if rect.width() > 4:
+            self._draw_name(p, rect, size, item.workspace, item.title,
+                            align_right, emphasis=emphasis, dim=dim)
+
     def _draw_task_name(self, p: QPainter, rect: QRectF, size: float,
                         align_right: bool = False, emphasis: bool = False) -> None:
-        self._draw_name(p, rect, size, self.status.workspace, self.status.title,
-                        align_right, emphasis=emphasis)
+        self._draw_agent_task_name(p, rect, size, self.status,
+                                  align_right, emphasis=emphasis)
 
     def _draw_elided(self, p: QPainter, text: str, font: QFont, color: QColor,
                      rect: QRectF, align_right: bool = False) -> None:
@@ -1632,7 +1665,7 @@ class SignalLight(QWidget):
             a_none.setEnabled(False)
             tl.addAction(a_none)
         for it in self.rows[:8]:
-            nm = " - ".join(x for x in (it.workspace, it.title) if x) or "任务"
+            nm = st.task_name(it)
             a_it = QAction(f"{st.LABELS.get(it.state, it.state)} · {nm}", tl)
             a_it.setEnabled(False)
             tl.addAction(a_it)
@@ -1803,13 +1836,13 @@ class SignalLight(QWidget):
             # 卡片上挤不下的信息在这里补全。
             tip += f"\n{len(self.rows)} 个任务并行"
             for it in rows:
-                nm = " - ".join(x for x in (it.workspace, it.title) if x) or "任务"
+                nm = st.task_name(it)
                 tip += f"\n  {st.LABELS.get(it.state, it.state)} · {nm}"
             if more:
                 tip += f"\n  另有 {more} 个"
         else:
             # 第一行是「工作空间 - 对话名」，托盘里也按同样顺序给全，避免两处对不上
-            parts = [x for x in (self.status.workspace, self.status.title) if x]
+            parts = [st.task_name(self.status)] if self.status.state != st.IDLE else []
             if parts:
                 tip += " · " + " · ".join(parts)
         if self.cool is not None:

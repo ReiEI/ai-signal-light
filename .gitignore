@@ -25,3 +25,6 @@ _dev/*.gif
 .idea/
 Thumbs.db
 desktop.ini
+
+# Generated read-only desktop probe
+assets/ChatGPTProbe.exe
