@@ -33,9 +33,9 @@ w.thermal.label = "GPU"
 NOW = time.time()
 ROWS = [
     st.Slot("workbuddy", "r1", st.RUNNING, "优化信号灯任务名称",
-            "改成工作空间 - 对话名两行显示", NOW - 95, 999, NOW, "AI学习"),
+            "改成工作空间 - 对话名两行显示", NOW - 95, 999, NOW, "示例项目"),
     st.Slot("codex", "r2", st.WAITING, "抓取竞品价格",
-            "等待确认是否覆盖同名文件", NOW - 260, 999, NOW, "消费理财"),
+            "等待确认是否覆盖同名文件", NOW - 260, 999, NOW, "数据分析"),
 ]
 
 

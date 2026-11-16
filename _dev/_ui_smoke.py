@@ -157,8 +157,8 @@ w._on_state_change()
 app.processEvents()
 h1 = w.height()
 
-w.rows = [mk(1, st.RUNNING, "AI学习", "完善信号灯", "改任务名称"),
-          mk(2, st.WAITING, "消费理财", "抓竞品价格", "等待确认")]
+w.rows = [mk(1, st.RUNNING, "示例项目", "完善信号灯", "改任务名称"),
+          mk(2, st.WAITING, "数据分析", "抓竞品价格", "等待确认")]
 w._row_keys = [M._row_key(s) for s in w.rows]
 w.status = st.compose(w.rows, st.Status())
 w._on_state_change()
@@ -189,8 +189,8 @@ check("多任务渲染不崩", not pm.isNull() and pm.width() == w.width(), pm.s
 for sid, extra in ((M.STYLE_BAR, 22), (M.STYLE_STACK, 30)):
     w.set_style(sid)
     app.processEvents()
-    w.rows = [mk(1, st.RUNNING, "AI学习", "完善信号灯", "改任务名称"),
-              mk(2, st.WAITING, "消费理财", "抓竞品价格", "等待确认")]
+    w.rows = [mk(1, st.RUNNING, "示例项目", "完善信号灯", "改任务名称"),
+              mk(2, st.WAITING, "数据分析", "抓竞品价格", "等待确认")]
     w._row_keys = [M._row_key(s) for s in w.rows]
     w.status = st.compose(w.rows, st.Status())
     w._on_state_change()

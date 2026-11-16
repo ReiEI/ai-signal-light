@@ -380,10 +380,10 @@ class SignalLight(QWidget):
         # 三元组顺序与真实数据一致：工作空间 / 对话名 / 本轮指令。
         # 最后一步故意放三个并行任务，用来检查多行布局与高度自动扩张。
         seq = [
-            (st.RUNNING, "AI学习", "完善信号灯任务名称", "优化：显示的任务名称，改为工作空间 + 对话名"),
-            (st.DONE, "AI学习", "完善信号灯任务名称", "已完成"),
-            (st.WAITING, "工作-202602-Alexa提问采集", "采集竞品价格", "等待你确认是否覆盖同名文件"),
-            (st.FAILED, "消费理财", "抓取竞品价格", "接口返回 429"),
+            (st.RUNNING, "示例项目", "完善信号灯任务名称", "优化：显示的任务名称，改为工作空间 + 对话名"),
+            (st.DONE, "示例项目", "完善信号灯任务名称", "已完成"),
+            (st.WAITING, "工作-202602-竞品调研", "采集竞品价格", "等待你确认是否覆盖同名文件"),
+            (st.FAILED, "数据分析", "抓取竞品价格", "接口返回 429"),
             (st.IDLE, "", "", ""),
         ]
         self.reader._last_mtime = 1e18  # 阻断真实文件覆盖
@@ -392,11 +392,11 @@ class SignalLight(QWidget):
             now = time.time()
             self.rows = [
                 st.Slot("workbuddy", "d1", st.RUNNING, "完善信号灯任务名称", "加多任务行显示",
-                        now - 95, 999, now, "AI学习"),
+                        now - 95, 999, now, "示例项目"),
                 st.Slot("workbuddy", "d2", st.WAITING, "采集竞品价格", "等待确认覆盖同名文件",
-                        now - 260, 999, now, "工作-202602-Alexa提问采集"),
+                        now - 260, 999, now, "工作-202602-竞品调研"),
                 st.Slot("workbuddy", "d3", st.RUNNING, "月度账单归类", "读取 3 月流水",
-                        now - 20, 999, now, "消费理财"),
+                        now - 20, 999, now, "数据分析"),
             ]
             self._row_keys = [_row_key(s) for s in self.rows]
             self.status = st.compose(self.rows, st.Status())
@@ -628,7 +628,7 @@ class SignalLight(QWidget):
                               max(label_w, QFontMetrics(f).horizontalAdvance(label) + 2), 15),
                        Qt.AlignLeft | Qt.AlignVCenter, label)
             # +3 是状态词与名称之间的呼吸位：宽度正好贴住时两个不同颜色的词
-            # 会黏成一句，读起来像"进行中AI学习"。
+            # 会黏成一句，读起来像"进行中示例项目"。
             prefix += label_w + 3
 
         tw = 0.0

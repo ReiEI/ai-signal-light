@@ -40,12 +40,12 @@ w.thermal.label = "GPU"
 
 NOW = time.time()
 SINGLE = [st.Slot("workbuddy", "r1", st.RUNNING, "优化信号灯任务名称",
-                  "改成工作空间 + 对话名两行显示", NOW - 95, 999, NOW, "AI学习")]
+                  "改成工作空间 + 对话名两行显示", NOW - 95, 999, NOW, "示例项目")]
 MULTI = [
     st.Slot("workbuddy", "r1", st.RUNNING, "优化信号灯任务名称",
-            "改成工作空间 + 对话名两行显示", NOW - 95, 999, NOW, "AI学习"),
+            "改成工作空间 + 对话名两行显示", NOW - 95, 999, NOW, "示例项目"),
     st.Slot("workbuddy", "r2", st.WAITING, "抓取竞品价格",
-            "等待你确认是否覆盖同名文件", NOW - 260, 999, NOW, "消费理财"),
+            "等待你确认是否覆盖同名文件", NOW - 260, 999, NOW, "数据分析"),
 ]
 
 # (标签, 设置覆盖, 任务集合, 是否开散热)
