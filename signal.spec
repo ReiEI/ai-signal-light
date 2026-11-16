@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['signal.py'],
+    ['signal_cli.py'],
     pathex=['app'],
     binaries=[],
     datas=[],

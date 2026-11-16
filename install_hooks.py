@@ -89,20 +89,50 @@ def _backup() -> Path | None:
         return None
 
 
+def _save_inplace(text: str) -> bool:
+    """WorkBuddy 正在运行时退回原地写。
+
+    os.replace 需要目标文件允许被删除，WorkBuddy 打开 settings.json 时
+    不给 FILE_SHARE_DELETE，所以原子替换必然失败；但普通句柄允许写入。
+    先写后截断，保证内容完整（中途崩溃最坏也只是内容变短，备份可还原）。
+
+    注意：原地写绕过原子替换，WorkBuddy 退出时可能用内存里的旧配置覆盖，
+    所以接完仍要重启 WorkBuddy 才真正生效。
+    """
+    data = text.encode("utf-8")
+    try:
+        mode = "r+b" if SETTINGS.exists() else "w+b"
+        with open(SETTINGS, mode) as f:
+            f.seek(0)
+            f.write(data)
+            f.truncate(len(data))
+            f.flush()
+            os.fsync(f.fileno())
+    except OSError as e:
+        print(f"[x] 原地写失败: {e}")
+        return False
+    return True
+
+
 def _save(data: dict) -> bool:
+    SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+    text = json.dumps(data, ensure_ascii=False, indent=2)
     tmp = SETTINGS.with_name("settings.json.tmp")
     try:
-        SETTINGS.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.write_text(text, encoding="utf-8")
         os.replace(tmp, SETTINGS)
         return True
     except PermissionError:
-        print("[x] 写入被拒绝 —— WorkBuddy 正在运行并锁定了这份配置。")
-        print("    请完全退出 WorkBuddy（右键托盘图标 -> 退出），再运行本脚本。")
         try:
             tmp.unlink(missing_ok=True)
         except OSError:
             pass
+        if _save_inplace(text):
+            print("[i] WorkBuddy 正在运行，已改为原地写入（非原子）。")
+            print("    请重启 WorkBuddy 后再验证；它退出时可能用旧配置覆盖。")
+            return True
+        print("[x] 写入被拒绝 —— WorkBuddy 正在运行并锁定了这份配置。")
+        print("    请完全退出 WorkBuddy（右键托盘图标 -> 退出），再运行本脚本。")
         return False
     except OSError as e:
         print(f"[x] 写入失败: {e}")

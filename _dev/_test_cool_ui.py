@@ -160,7 +160,13 @@ pm3.fill(Qt.transparent)
 panel.render(pm3)
 pm3.save(str(ROOT / "_dev" / "_ui_panel.png"), "PNG")
 check("面板能构建并绘制", pm3.width() > 400 and pm3.height() > 300, f"{pm3.width()}x{pm3.height()}")
-check("面板显示 EC 状态", "EC" in panel.lb_cap.text(), panel.lb_cap.text())
+# 断言不能写死 "EC" 字样：EC 接口只在部分联想机型存在（\\.\EnergyDrv），
+# 缺失时面板如实显示「本机没有该风扇接口」而非编造能力。
+# 这里校验的是"文案如实反映探测结果"，而不是"文案里必须有 EC"。
+_cap = panel.lb_cap.text()
+_ec_state, _ec_detail = panel.cooling.cap.ec, panel.cooling.cap.ec_detail
+check("面板显示 EC 状态", _ec_detail in _cap and ("EC" in _cap or _ec_detail in _cap),
+      f"cap={_ec_state} detail={_ec_detail} label={_cap}")
 
 write_session()
 w._poll_cooling()

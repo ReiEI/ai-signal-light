@@ -59,7 +59,7 @@ check("初始无自启条目", _reg_read() is None)
 
 # ── 2. 写入：frozen 路径（模拟 exe 运行） ─────────────────────
 print("2) frozen 路径写入")
-fake_exe = r"D:\AI\WorkBuddy\AI学习\AI工作信号灯\dist\SignalLight.exe"
+fake_exe = r"C:\Program Files\AI Signal Light\dist\SignalLight.exe"
 cmd_frozen = f'"{fake_exe}"'
 _reg_write(cmd_frozen)
 val = _reg_read()

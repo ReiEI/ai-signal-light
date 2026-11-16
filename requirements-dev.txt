@@ -1,0 +1,6 @@
+# 开发/测试依赖（不参与正式运行，仅 _dev/ 下的测试与打包脚本需要）
+# Pillow：_dev/_test_icon.py 与 _dev/_make_icon.py 生成图标资产时使用
+Pillow==11.3.0
+
+# 打包依赖（打包.cmd 也会自行安装）
+pyinstaller==6.22.3

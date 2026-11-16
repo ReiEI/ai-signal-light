@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT))
 import state as st  # noqa: E402
 
 PY = str(ROOT / ".venv" / "Scripts" / "python.exe")
-SIG = str(ROOT / "signal.py")
+SIG = str(ROOT / "signal_cli.py")
 
 ok = 0
 fail = 0
@@ -66,7 +66,7 @@ try:
 except ValueError:
     check("非法状态抛错", True)
 
-print("5) CLI: signal.py running / clear")
+print("5) CLI: signal_cli.py running / clear")
 subprocess.run([PY, SIG, "running", "CLI 测试", "-d", "参数", "-t", "20"], check=True,
                capture_output=True)
 r2 = st.StateReader()
