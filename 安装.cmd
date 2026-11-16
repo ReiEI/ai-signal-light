@@ -18,6 +18,20 @@ rem runnable interpreter and hands over.
 setlocal
 cd /d "%~dp0"
 
+rem A trailing "pause" keeps the window open so a human who double-clicked
+rem this file can read the result. But in a non-interactive context (CI, a
+rem script, a piped invocation) stdin is not a console, "pause" never
+rem receives a keypress and blocks forever - the caller hangs with no
+rem output at all.
+rem
+rem So: skip the pause when stdin is redirected, and also allow an explicit
+rem opt-out via NO_PAUSE=1.
+if not defined NO_PAUSE (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+        "if ([Console]::IsInputRedirected) { exit 1 } else { exit 0 }"
+    if errorlevel 1 set "NO_PAUSE=1"
+)
+
 rem Optional argument: path to a python.exe. Use it when Python is installed
 rem but not on PATH:
 rem     install.cmd "C:\Users\you\AppData\Local\Programs\Python\Python313\python.exe"
@@ -111,7 +125,7 @@ if errorlevel 1 goto testfail
 
 echo.
 echo Done. Double-click the launcher cmd to start.
-pause
+call :maybe_pause
 exit /b 0
 
 :nopython
@@ -134,13 +148,13 @@ echo      "%USERPROFILE%\AppData\Local\Programs\Python\Python313\python.exe" -m 
 echo.
 echo   C) The Microsoft Store version does NOT work - it is only a stub.
 echo.
-pause
+call :maybe_pause
 exit /b 1
 
 :envfail
 echo.
 echo [ERROR] Environment check failed. See the report above for details.
-pause
+call :maybe_pause
 exit /b 1
 
 :deperr
@@ -157,12 +171,18 @@ echo
 echo or set it permanently, then run install.cmd again:
 echo   .venv\Scripts\python.exe -m pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 echo
-pause
+call :maybe_pause
 exit /b 1
 
 :testfail
 echo.
 echo [ERROR] Self-test failed. The installation may be incomplete.
 echo Run ".venv\Scripts\python.exe selftest.py" to see which checks failed.
-pause
+call :maybe_pause
 exit /b 1
+
+rem Pause only when a human is actually watching. See the note near the top.
+:maybe_pause
+if defined NO_PAUSE exit /b 0
+pause
+exit /b 0

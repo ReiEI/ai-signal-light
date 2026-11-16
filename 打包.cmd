@@ -7,9 +7,25 @@ rem
 rem Pure ASCII on purpose: cmd.exe parses batch files with the system ANSI
 rem code page (GBK on Chinese Windows), and UTF-8 text breaks the parser.
 cd /d "%~dp0"
+
+rem A trailing "pause" keeps the window open so a human who double-clicked
+rem this file can read the result. But in a non-interactive context (CI, a
+rem script, a piped invocation) stdin is not a console, "pause" never
+rem receives a keypress and blocks forever. That is not a cosmetic problem:
+rem it hangs the caller with no output.
+rem
+rem So: skip the pause when stdin is redirected, and also allow an explicit
+rem opt-out via NO_PAUSE=1. PowerShell is already required below, so using
+rem it here costs nothing.
+if not defined NO_PAUSE (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+        "if ([Console]::IsInputRedirected) { exit 1 } else { exit 0 }"
+    if errorlevel 1 set "NO_PAUSE=1"
+)
+
 if not exist ".venv\Scripts\python.exe" (
     echo [ERROR] .venv not found. Run install first.
-    pause
+    call :maybe_pause
     exit /b 1
 )
 
@@ -26,7 +42,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 if errorlevel 1 (
     echo [ERROR] SignalLight.exe is running - the build cannot overwrite it.
     echo         Close it from the tray icon, then run this again.
-    pause
+    call :maybe_pause
     exit /b 1
 )
 
@@ -35,7 +51,7 @@ rem silently pick up a newer pyinstaller and change build behaviour.
 ".venv\Scripts\python.exe" -m pip install -q "pyinstaller==6.22.3"
 if errorlevel 1 (
     echo [ERROR] Failed to install pyinstaller.
-    pause
+    call :maybe_pause
     exit /b 1
 )
 
@@ -76,18 +92,24 @@ if errorlevel 1 goto badbundle
 echo.
 echo Build finished:
 dir /b dist\*.exe
-pause
+call :maybe_pause
 exit /b 0
 
 :fail
 echo.
 echo [ERROR] Build failed.
-pause
+call :maybe_pause
 exit /b 1
 
 :badbundle
 echo.
 echo [ERROR] The build produced broken output - see the report above.
 echo         Do not publish these files. Fix the cause and rebuild.
-pause
+call :maybe_pause
 exit /b 1
+
+rem Pause only when a human is actually watching. See the note near the top.
+:maybe_pause
+if defined NO_PAUSE exit /b 0
+pause
+exit /b 0
