@@ -33,7 +33,17 @@ w.show()
 for t in (w._anim, w._res, w._poll, w._cool):
     t.stop()
 app.processEvents()
-w.metrics.sample()
+# 指标区钉死为确定值：sample() 采的是渲染机器的实时负载，
+# 每次跑出来的 CPU/内存/网络/核数都不一样，README 配图无法复现。
+# 这里用一组固定的示例值，与 README 正文里的示意数值保持一致。
+w.metrics.cpu = 19.0
+w.metrics.mem = 61.0
+w.metrics.mem_used = int(w.metrics.mem_total * 0.59) if w.metrics.mem_total else 9_437_184
+w.metrics.mem_total = 16 * 1024 ** 3
+w.metrics.mem_used = int(w.metrics.mem_total * 0.59)
+w.metrics.cores = 16
+w.metrics.down = 3.6 * 1024 * 1024
+w.metrics.up = 112 * 1024
 w.thermal.temp = 53.0
 w.thermal.label = "GPU"
 
@@ -48,6 +58,10 @@ rows = [
 ]
 
 w.set_style("standard")
+# README 配图必须可复现：显式钉死深色主题。
+# 否则 auto 会跟随渲染机器的 Windows 深浅色，同一份代码在浅色系统上
+# 渲染出浅色截图，README 首图与文中描述的深色卡片对不上。
+w._apply_theme("dark", save=False)
 w.rows = list(rows)
 w._row_keys = [M._row_key(s) for s in rows]
 w.status = st.compose(rows, st.Status())
