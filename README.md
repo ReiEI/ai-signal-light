@@ -126,7 +126,7 @@ Windows 桌面常驻小挂件。无边框、始终置顶、可拖拽，用一盏
 | | **A · 下载即用** | **B · 自己构建** |
 |---|---|---|
 | 适合 | 不想碰 Python，挂个灯就走 | 要改代码 / 不想跑未签名 exe / 想自己出包 |
-| 需要 | Windows 10/11 x64 | 再加 Python 3.13 x64 |
+| 需要 | Windows 10/11 x64 | 再加 Python 3.10+ x64（3.13 实测） |
 | 操作 | 下载 → 双击 | `安装.cmd` → `启动.cmd` |
 | 首次耗时 | 约 1 分钟 | 3~5 分钟（装依赖 + 自检） |
 | 可控性 | 二进制黑盒 | 全是源码，行行能改 |
@@ -152,7 +152,7 @@ Windows 桌面常驻小挂件。无边框、始终置顶、可拖拽，用一盏
 ### B · 自己构建
 
 ```bat
-安装.cmd      :: 建虚拟环境 + 按 requirements.txt 装依赖 + 跑一遍自检
+安装.cmd      :: 找 Python + 建虚拟环境 + 装依赖 + 跑一遍自检
 启动.cmd      :: 启动挂件（有 dist\SignalLight.exe 就优先用它，否则用源码）
 演示.cmd      :: 循环演示五种状态
 ```
@@ -160,14 +160,50 @@ Windows 桌面常驻小挂件。无边框、始终置顶、可拖拽，用一盏
 只改代码、想立刻看效果，到这一步就够了。要出独立 exe（产物在 `dist\`，和 Release 里那份同源）：
 
 ```bat
-打包.cmd      :: 依次打 SignalLight.exe / signal.exe / fan_agent.exe
+打包.cmd      :: 依次打 SignalLight.exe / signal.exe / fan_agent.exe + 自检产物
 ```
 
-依赖已固定版本（`PySide6==6.12.0`、`psutil==7.2.2`），`安装.cmd` 读 `requirements.txt`，不会因为上游发新版而行为漂移。打包另需 `pyinstaller`，`打包.cmd` 会自己装。
+依赖已固定版本（`PySide6==6.12.0`、`psutil==7.2.2`），`安装.cmd` 读 `requirements.txt`，不会因为上游发新版而行为漂移。打包另需 `pyinstaller==6.22.3`，`打包.cmd` 会自己装。
 
 启动后出现在屏幕右下角。**拖拽**移动，**双击**在标准卡/横条之间切换，**右键**出菜单（置顶 / 样式 / 尺寸 / **显示元素** / 温度 / **散热** / 任务清单 / 开机自启 / 演示 / 退出）。托盘图标双击可隐藏/显示。
 
 > 所有 `.cmd` 内容为纯 ASCII。这是刻意的：cmd.exe 按系统 ANSI 代码页（中文 Windows 是 GBK）解析批处理，UTF-8 中文会直接把脚本解析崩掉。
+
+#### 新机安装会遇到的几个坑（以及已经做好的处理）
+
+`安装.cmd` 不再简单地 `python -m venv`，因为"装不上"的原因有好几种，解法各不相同：
+
+| 情况 | 现象 | 处理 |
+|---|---|---|
+| 根本没装 Python | `python` 命令不存在 | 依次试 `py -3` → `python` → `python3` → 常见安装路径，全失败才报错 |
+| **装了但没勾「Add to PATH」** | PATH 里没有，但文件在 `%LOCALAPPDATA%\Programs\Python\Python313\` | 脚本直接扫这几个标准路径；也可以手动指定：`安装.cmd "C:\...\python.exe"` |
+| **只装了 Microsoft Store 版** | `python` 存在、能跑、但**什么都不输出**就退出（退出码 9009/49） | 预检会识别出这是占位符并明确告诉你"它不是真解释器" |
+| 装的是 32 位版 | venv 能建，但 PySide6 没有 32 位 wheel | 预检直接报"是 32 位，PySide6 只提供 64 位 wheel" |
+| Python 版本太老 | 依赖装不上，报错信息晦涩 | 预检给出实际要求：**3.10 – 3.15，64 位**（PySide6 6.12 官方要求 `>=3.10,<3.16`） |
+| `.venv` 是坏的 | 换机 / 换 Python 版本 / 搬目录后，venv 里的解释器路径失效 | 预检发现后**自动删掉重建**，而不是复用坏目录 |
+
+环境体检可以单独跑：
+
+```bat
+.venv\Scripts\python.exe check_env.py
+```
+
+它会逐个测试候选解释器、分清「不可用」和「版本不对」和「位数不对」，最后给出结论和可复制的修法命令。
+
+**下载慢**：`PySide6` 拆成 7 个包一共 250+ MB，走 pypi.org 在国内可能很慢。用镜像：
+
+```bat
+set PIPMIRROR=-i https://pypi.tuna.tsinghua.edu.cn/simple
+安装.cmd
+```
+
+或者一次性设好，之后 `安装.cmd` 自动生效：
+
+```bat
+.venv\Scripts\python.exe -m pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+**打包前要先退出挂件**：PyInstaller 直接写 `dist\SignalLight.exe`，而 Windows 不允许覆盖正在运行的 exe。`打包.cmd` 现在会在开头检测并直接告诉你，不会让你等三分钟才失败。
 
 ---
 
@@ -459,7 +495,10 @@ AI工作信号灯/
 ├─ signal.py            状态写入端（源码）
 ├─ install_hooks.py     WorkBuddy 接入安装器（幂等 / 可卸载）
 ├─ selftest.py          自检（21 项）
+├─ check_env.py         环境预检（找 Python / 查 venv / 给修法）
+├─ verify_dist.py       打包产物自检（拆 exe 验内嵌模块）
 ├─ requirements.txt     依赖固定版本（PySide6 / psutil）
+├─ requirements-dev.txt 开发/测试依赖（Pillow / pyinstaller）
 ├─ 安装.cmd / 启动.cmd / 演示.cmd / 打包.cmd / signal.cmd
 ├─ 接入WorkBuddy.cmd / 断开WorkBuddy.cmd
 └─ _dev/                开发期工具（离屏渲染、抓屏、测试），不参与运行

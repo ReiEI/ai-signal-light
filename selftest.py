@@ -18,6 +18,10 @@ os.environ["AISIGNAL_HOME"] = str(_TEST_HOME)
 sys.path.insert(0, str(ROOT / "app"))
 sys.path.insert(0, str(ROOT))
 
+import textio  # noqa: E402
+
+textio.bind_console_encoding()
+
 import state as st  # noqa: E402
 
 PY = str(ROOT / ".venv" / "Scripts" / "python.exe")

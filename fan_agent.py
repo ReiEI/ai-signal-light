@@ -487,13 +487,41 @@ def main(argv: list[str] | None = None) -> int:
     def _on_signal(_sig, _frm):
         agent.stop()
 
+    # 装信号处理器（双保险，主路径是 stop.flag 文件协商）。
+    #
+    # 主停止路径是 stop.flag：界面杀不掉这个进程（它是后台提权跑的），
+    # 双方靠文件协商退出。所以信号处理器只是兜底。
+    #
+    # 注意：打包成 --windowed 的 exe 没有控制台，收不到 Ctrl+C /
+    # CTRL_BREAK —— 这是设计如此，不是缺陷。真正能触发这里的场景是
+    # 以源码方式运行（python fan_agent.py）时按 Ctrl+C。
+    #
+    # 这里必须显式检查装上了几个，而不是"有就装、没有就跳过"。历史上有过
+    # 一个真实缺陷：仓库根目录的 signal.py 与标准库 signal 同名，打包时
+    # PyInstaller 把仓库那份收进了 PYZ，遮蔽了标准库。仓库那份没有
+    # SIGTERM/SIGINT/SIGBREAK，于是 getattr 全返回 None，处理器一个都没
+    # 装上 —— 进程被强杀时无法优雅退出，散热状态来不及还原
+    # （atexit 也会被跳过）。
+    #
+    # 静默失败比崩溃更难查，所以装不上时明确说出来。
+    installed = []
     for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
         fn = getattr(signal, name, None)
-        if fn is not None:
-            try:
-                signal.signal(fn, _on_signal)
-            except (OSError, ValueError):
-                pass
+        if fn is None:
+            continue
+        try:
+            signal.signal(fn, _on_signal)
+            installed.append(name)
+        except (OSError, ValueError) as e:
+            print(f"[!] 无法安装 {name} 处理器: {e}", file=sys.stderr)
+
+    if not installed:
+        print("[!] 没有任何信号处理器装上 —— Ctrl+C 将无法优雅退出，"
+              "散热状态可能来不及还原。", file=sys.stderr)
+        print(f"    当前 signal 模块来自: {getattr(signal, '__file__', '?')}",
+              file=sys.stderr)
+    else:
+        print(f"[i] 已安装信号处理器: {', '.join(installed)}", file=sys.stderr)
 
     code, msg = agent.run()
     return code
