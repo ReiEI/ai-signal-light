@@ -29,7 +29,7 @@ echo [2/3] signal.exe
 ".venv\Scripts\python.exe" -m PyInstaller --noconfirm --onefile --console ^
     --paths app --hidden-import state --hidden-import textio ^
     --icon "assets\signallight.ico" ^
-    --name "signal" --distpath dist --workpath build\signal signal.py
+    --name "signal" --distpath dist --workpath build\signal signal_cli.py
 if errorlevel 1 goto fail
 
 echo.

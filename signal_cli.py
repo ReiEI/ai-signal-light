@@ -4,21 +4,21 @@
 用法
 ----
 1) 直接置状态
-   python signal.py running "生成 Q3 运营报告" -d "读取数据表"
-   python signal.py waiting "批量重命名" -d "等待确认"
-   python signal.py done    "生成 Q3 运营报告" -d "用时 42s"
-   python signal.py failed  "抓取竞品价格" -d "接口 429"
-   python signal.py idle
+   python signal_cli.py running "生成 Q3 运营报告" -d "读取数据表"
+   python signal_cli.py waiting "批量重命名" -d "等待确认"
+   python signal_cli.py done    "生成 Q3 运营报告" -d "用时 42s"
+   python signal_cli.py failed  "抓取竞品价格" -d "接口 429"
+   python signal_cli.py idle
 
 2) 包一条命令，自动维护开始/完成/失败（推荐）
-   python signal.py run "生成 Q3 运营报告" -- python build_report.py
+   python signal_cli.py run "生成 Q3 运营报告" -- python build_report.py
 
    run 模式会在执行期间每 4 秒续期一次心跳（ttl=12s），
    命令退出码 0 → done，非 0 → failed。
    这样即使脚本卡死，12 秒内也会自动回落为空闲，不会亮假灯。
 
 3) 长任务手动心跳
-   python signal.py running "长任务" -t 30     # 每次调用续期 30s
+   python signal_cli.py running "长任务" -t 30     # 每次调用续期 30s
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ def cmd_set(args) -> int:
 
 def cmd_run(args) -> int:
     if not args.cmd:
-        print("用法: signal.py run \"标题\" -- <命令...>", file=sys.stderr)
+        print("用法: signal_cli.py run \"标题\" -- <命令...>", file=sys.stderr)
         return 2
 
     title = args.title or ""
@@ -104,7 +104,7 @@ def main() -> int:
 
     p_clear = sub.add_parser("clear", help="清空为 idle")
 
-    # 便捷写法：signal.py running "标题"  → 等价 set running
+    # 便捷写法：signal_cli.py running "标题"  → 等价 set running
     argv = sys.argv[1:]
     if argv and argv[0] in st.VALID_STATES:
         argv = ["set"] + argv
