@@ -261,10 +261,17 @@ class Capability:
         return False, "未知模式"
 
     def needs_admin(self, mode: str) -> bool:
+        """这个模式是否必须提权才能跑。
+
+        注意 EC 只在"设备存在但当前权限不够"时才需要提权。
+        接口压根不存在（missing）时提权也没用——那是机型问题，不是权限问题。
+        反过来写成 `self.ec != ecfan.OK` 会把 missing/unsupported 也算成
+        "需要管理员"，一旦调用顺序变了就是白弹一次 UAC 再失败。
+        """
         if mode == MODE_SPIN:
             return True
         if mode == MODE_EC:
-            return self.ec != ecfan.OK
+            return self.ec == ecfan.DENIED
         return False
 
     def summary(self) -> str:

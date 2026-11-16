@@ -316,6 +316,25 @@ _s2 = st.load_settings()
 check("越界时长被修正回 30", _s2["cool_minutes"] == 30, _s2["cool_minutes"])
 check("过小周期被修正回 8.9", abs(_s2["cool_cycle"] - 8.9) < 0.01, _s2["cool_cycle"])
 
+print("14) needs_admin：接口不存在时不该提权")
+_cap = cool.Capability(probe=False)
+for _st, _expect_admin, _why in (
+    (ecfan.OK, False, "接口可读写 → 直接跑"),
+    (ecfan.DENIED, True, "设备存在但权限不够 → 必须提权"),
+    (ecfan.MISSING, False, "接口不存在 → 提权也没用"),
+    (ecfan.UNSUPPORTED, False, "驱动不认 → 提权也没用"),
+):
+    _cap.ec = _st
+    check(f"ec={_st} → needs_admin={_expect_admin}", _cap.needs_admin(cool.MODE_EC) is _expect_admin, _why)
+_cap.ec = ecfan.MISSING
+check("ec=missing → mode_state 判不可用", _cap.mode_state(cool.MODE_EC)[0] is False)
+check("ec=missing → 原因写明是本机无此接口", _cap.mode_state(cool.MODE_EC)[1] == "本机无此接口", _cap.mode_state(cool.MODE_EC)[1])
+_cap.ec = ecfan.OK
+check("ec=ok → mode_state 判可用", _cap.mode_state(cool.MODE_EC)[0] is True)
+_cap.ec = ecfan.MISSING
+check("burn 模式永远不需要特权", _cap.needs_admin(cool.MODE_BURN) is False)
+check("spin 模式永远需要特权", _cap.needs_admin(cool.MODE_SPIN) is True)
+
 print()
 print(f"结果: {ok} 通过 / {bad} 失败")
 shutil.rmtree(_TMP, ignore_errors=True)
