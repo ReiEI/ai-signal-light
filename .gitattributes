@@ -1,0 +1,17 @@
+# 统一换行符。
+#
+# .cmd 必须用 CRLF：cmd.exe 按 CRLF 识别命令行边界，LF-only 的批处理在
+# 某些环境下会出现解析异常（尤其在 label 与 goto 混用时）。
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Python 源码用 CRLF，与仓库里已有的 .py 保持一致
+*.py text eol=crlf
+
+# 二进制，禁止任何换行符转换
+*.png binary
+*.ico binary
+*.jpg binary
+*.gif binary
+*.svg text
+*.exe binary
