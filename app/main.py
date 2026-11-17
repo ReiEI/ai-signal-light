@@ -218,6 +218,17 @@ class SignalLight(QWidget):
         self._demo = demo
         self._demo_idx = 0
         self._demo_t0 = time.time()
+        # 演示一轮就结束，不再循环。用显式标记而不是取模，
+        # 因为取模（% DEMO_STEPS）会让它无限转下去 —— 用户看到的就是
+        # "演示五种状态"点下去就停不下来。
+        self._demo_finished = False
+        # 演示期间真实槽位的快照，用于结束后巡检"期间是否产生了新状态"。
+        # 键是槽位指纹，值是该槽位当时的状态。
+        self._demo_seen: dict[tuple, str] = {}
+        # 演示期间检测到的、需要补播报的状态变化。
+        self._demo_pending: list[tuple[str, str, str]] = []
+        # 槽位消失前它叫什么 —— 播报"任务结束"时得说得出是哪个任务。
+        self._demo_gone: dict[tuple, str] = {}
 
         self.setWindowFlags(
             Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool
@@ -281,6 +292,7 @@ class SignalLight(QWidget):
 
         if demo:
             self._demo_t0 = time.time()
+            self._demo_snapshot_baseline()
             self._push_demo()
 
     # ---------------- 生命周期 ----------------
@@ -372,9 +384,101 @@ class SignalLight(QWidget):
             now = time.time()
             if now - self._demo_t0 > 3.0:
                 self._demo_t0 = now
-                self._demo_idx = (self._demo_idx + 1) % DEMO_STEPS
-                self._push_demo()
+                # 演示期间持续盯着真实槽位：这段时间里真的来了新任务，
+                # 用户在演示画面上是看不见的，结束后必须补播报。
+                self._scan_real_slots()
+                if self._demo_idx + 1 >= DEMO_STEPS:
+                    # 一轮走完，停下来。
+                    self._finish_demo()
+                else:
+                    self._demo_idx += 1
+                    self._push_demo()
         self.update()
+
+    def _scan_real_slots(self) -> None:
+        """演示期间巡检真实槽位，记录期间新产生的状态。
+
+        演示画面占着整个窗口，用户在这段时间里看不到真实任务。
+        如果这段时间真的有任务开始或结束，演示结束后必须补播报，
+        否则"点了演示"就等于把真实进度静音了几十秒。
+        """
+        try:
+            slots = st.read_slots()
+        except OSError:
+            return
+        alive: set[tuple] = set()
+        for s in slots:
+            key = (s.source, s.sid)
+            alive.add(key)
+            # 记住标题，槽位消失时才能说出是哪个任务结束了。
+            self._demo_gone[key] = " - ".join(x for x in (s.workspace, s.title) if x)
+            prev = self._demo_seen.get(key)
+            if prev is None:
+                # 演示期间首次出现 —— 基线里没有这个槽位，
+                # 说明它是演示开始之后才产生的，必须播报。
+                self._demo_seen[key] = s.state
+                if s.state != st.IDLE:
+                    self._demo_pending.append((s.state, s.title, s.workspace))
+                continue
+            if s.state != prev:
+                # 已知槽位的状态跃迁（running -> done / failed / waiting）。
+                self._demo_seen[key] = s.state
+                if s.state != st.IDLE:
+                    self._demo_pending.append((s.state, s.title, s.workspace))
+        # 槽位消失 = 任务结束了。槽位文件一过期就被 read_slots 删掉，
+        # 不主动比对就永远看不到"结束"这件事 —— 而这恰恰是最该播报的。
+        for key, state in list(self._demo_seen.items()):
+            if key not in alive and state != st.IDLE:
+                self._demo_pending.append((st.DONE, self._demo_gone.get(key, ""), ""))
+                self._demo_seen.pop(key, None)
+                self._demo_gone.pop(key, None)
+
+    def _finish_demo(self) -> None:
+        """演示一轮结束：巡检期间漏掉的状态、播报、恢复真实显示。"""
+        self._demo = False
+        self._demo_finished = True
+
+        # 恢复真实状态前必须重置 reader。
+        # 演示时把 reader._last 改成了演示态，它的 ts 是演示时刻；
+        # 真实状态的 ts 更早，StateReader 的单调性保护会把真实状态
+        # 当成"时间倒退"直接丢弃 —— 结果就是演示结束后永远停在演示画面。
+        self.reader._last = st.Status()
+        self.reader._last_mtime = 0.0
+        self._prev_state = None
+
+        # 最后再扫一次：演示最后一步期间到达的任务也要算进去。
+        self._scan_real_slots()
+
+        if self._demo_pending:
+            self._announce_pending(self._demo_pending)
+            self._demo_pending = []
+
+        # 立刻拉回真实状态，不等下一个轮询周期。
+        self._poll_state()
+
+    def _stop_demo(self) -> None:
+        """用户主动中断演示。
+
+        中途退出同样要巡检：用户点了演示就说明他在等某个真实任务的进展，
+        让他自己按"停止"时，期间漏掉的状态一样得补播报。
+        """
+        if not self._demo:
+            return
+        self._finish_demo()
+
+    def _announce_pending(self, pending: list[tuple[str, str, str]]) -> None:
+        """把演示期间漏掉的状态变化播报出来。"""
+        if not pending:
+            return
+        lines = []
+        for state, title, workspace in pending[-3:]:
+            label = st.LABELS.get(state, state)
+            name = " - ".join(x for x in (workspace, title) if x) or "任务"
+            lines.append(f"{label}：{name}")
+        body = "\n".join(lines)
+        if len(pending) > 3:
+            body += f"\n（演示期间共 {len(pending)} 条变化）"
+        self._notify(body, "AI 工作信号灯 · 演示期间有变化")
 
     def _push_demo(self) -> None:
         # 三元组顺序与真实数据一致：工作空间 / 对话名 / 本轮指令。
@@ -415,6 +519,11 @@ class SignalLight(QWidget):
 
     def _poll_state(self) -> None:
         if self._demo:
+            # 演示期间监听器必须继续跑：Codex 那边正在写的槽位
+            # 就是真实状态，停掉就等于把真实进度静音了几十秒。
+            # 但读到的状态不能覆盖演示画面 —— 那是给人看的固定演示内容。
+            self.codex.poll()
+            self._scan_real_slots()
             return
         # Codex 监听器自己写槽位，这里只需在它之后统一重读
         self.codex.poll()
@@ -1658,9 +1767,20 @@ class SignalLight(QWidget):
         a_dir.triggered.connect(self._open_dir)
         m.addAction(a_dir)
 
-        a_demo = QAction("演示五种状态", m)
+        # 演示一轮就走完（约 18 秒），不会像以前那样无限循环。
+        # 文案要说清楚是"一轮"，否则用户点了发现它停了会以为坏了。
+        a_demo = QAction("演示一轮（五种状态）", m)
         a_demo.triggered.connect(self._start_demo)
         m.addAction(a_demo)
+
+        # 演示中的应急出口：一轮 18 秒不算长，但用户随时可能想立刻回到
+        # 真实状态（正好在等一个任务的完成）。没有这个就只能干等。
+        # 菜单是每次右键现建的，所以可见性按当前演示状态即时决定，
+        # 不能靠上一次右键时存下来的 QAction —— 那是上一个菜单的实例。
+        if self._demo:
+            a_stop_demo = QAction("停止演示", m)
+            a_stop_demo.triggered.connect(self._stop_demo)
+            m.addAction(a_stop_demo)
 
         m.addSeparator()
         a_quit = QAction("退出", m)
@@ -1848,7 +1968,24 @@ class SignalLight(QWidget):
         self._demo = True
         self._demo_idx = 0
         self._demo_t0 = time.time()
+        self._demo_finished = False
+        self._demo_pending = []
+        # 先记下当前真实槽位作为基线：演示开始前就在跑的任务
+        # 不算"期间新产生"，否则每轮演示都会把老任务播报一遍。
+        self._demo_snapshot_baseline()
         self._push_demo()
+
+    def _demo_snapshot_baseline(self) -> None:
+        """记录演示开始前的真实槽位，作为巡检的对比基线。"""
+        self._demo_seen = {}
+        self._demo_gone = {}
+        try:
+            for s in st.read_slots():
+                key = (s.source, s.sid)
+                self._demo_seen[key] = s.state
+                self._demo_gone[key] = " - ".join(x for x in (s.workspace, s.title) if x)
+        except OSError:
+            pass
 
     def _autostart_key(self):
         import winreg
