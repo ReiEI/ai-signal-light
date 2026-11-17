@@ -1,5 +1,7 @@
 @echo off
-rem Demo mode: cycle through the five states
+rem Demo mode: run through the five states once, then hand back to the
+rem real status. It used to loop forever, which meant you could never get
+rem back to the widget doing its actual job.
 cd /d "%~dp0"
 
 rem Skip the trailing pause when nobody is watching (CI, script, pipe).
